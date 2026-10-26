@@ -26,10 +26,29 @@ What this means in practice on a One UI 9 S26: the container will mount and pivo
 
 The container also records what it is running in `/data/local/tmp/lineage_stage/image_info` (name, Android version, filesystem, source URL) and `runtime_info` (host/guest SDK, filesystem), which the app shows in the image status line.
 
-## What's in here
+## Other GSI files
+
+The **Other GSI Files** card installs any arm64 system-as-root GSI you already have, not just the builds the app downloads:
+
+- **Pick a File** opens the system file picker (internal storage, SD card, USB drive or a cloud provider). The file is copied into the app cache, staged as root, and the copy is deleted afterwards.
+- **Find on Device** lists files over 300 MB that look like GSIs on internal storage and SD cards, plus a manual path option. Root reads the file where it is, so nothing is copied and your original is never moved or deleted.
+
+Accepted inputs are a `.img` or a `.7z`, `.zip`, `.xz` or `.gz` containing one (the largest image inside an archive is used). Images are identified by their bytes, not their name:
+
+| Image | What happens |
+| --- | --- |
+| Raw ext4 or erofs | Used as is |
+| Android sparse (stock `system.img`, fastboot images) | Converted to raw automatically, with the device's `simg2img` if present, otherwise with the bundled `SparseTool` run as root through `app_process` |
+| `super.img` | Rejected with a message; extract `system.img` from it with `lpunpack` first |
+| Anything else | Rejected |
+
+The Android version of a local file is guessed from its name when possible. Either way `master_prepare.sh` reads the real SDK from the image's `build.prop` at switch time and only binds patches that match it.
+
+
 | Path | What it is |
 | --- | --- |
 | `src/`, `res/`, `AndroidManifest.xml` | The Android app (`com.wewaffles.onelineage`) |
+| `src/.../SparseTool.java` | Sparse-to-raw image converter (simg2img equivalent), run as root via `app_process` |
 | `assets/master_prepare.sh` | Stages the rootfs (ext4 or erofs), binds the generation-matched patched files, fixes labels/ownership |
 | `assets/master_inner.sh` | Runs inside the container, starts the guest zygote |
 | `assets/switch_to_lineage.sh` / `return_to_oneui.sh` | Switch in and back out |

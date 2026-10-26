@@ -498,6 +498,66 @@
             </LinearLayout>
         </LinearLayout>
 
+        <!-- Other GSI files: install an image already on the phone -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:background="@drawable/card_surface_container"
+            android:orientation="vertical"
+            android:padding="20dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Other GSI Files"
+                android:textColor="@color/m3_primary"
+                android:textSize="13sp"
+                android:fontFamily="sans-serif-medium" />
+
+            <TextView
+                android:id="@+id/tv_local_gsi_desc"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Install any arm64 GSI you already have: a .img (raw or sparse) or a .7z, .zip, .xz or .gz containing one. Sparse images are converted automatically."
+                android:textColor="@color/m3_text_secondary"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_import_gsi"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/btn_m3_tonal"
+                    android:text="@string/btn_import_gsi"
+                    android:textAllCaps="false"
+                    android:textColor="@color/m3_primary"
+                    android:textSize="13sp"
+                    android:fontFamily="sans-serif-medium" />
+
+                <Button
+                    android:id="@+id/btn_local_gsi"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/btn_m3_tonal"
+                    android:text="@string/btn_local_gsi"
+                    android:textAllCaps="false"
+                    android:textColor="@color/m3_primary"
+                    android:textSize="13sp"
+                    android:fontFamily="sans-serif-medium" />
+            </LinearLayout>
+        </LinearLayout>
+
         <!-- One UI Protection Card -->
         <LinearLayout
             android:layout_width="match_parent"

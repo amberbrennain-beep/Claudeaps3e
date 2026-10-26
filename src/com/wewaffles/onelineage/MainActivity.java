@@ -2,7 +2,11 @@ package com.wewaffles.onelineage;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.net.Uri;
+import android.provider.OpenableColumns;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -99,6 +103,11 @@ public class MainActivity extends Activity {
     private Button btnReturnOneUI;
     private Button btnBackupLauncher;
     private Button btnRestoreLauncher;
+    private Button btnImportGsi;
+    private Button btnLocalGsi;
+    private TextView tvLocalGsiDesc;
+
+    private static final int REQ_PICK_GSI = 4201;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -188,6 +197,9 @@ public class MainActivity extends Activity {
         btnReturnOneUI = findViewById(R.id.btn_return_oneui);
         btnBackupLauncher = findViewById(R.id.btn_backup_launcher);
         btnRestoreLauncher = findViewById(R.id.btn_restore_launcher);
+        btnImportGsi = findViewById(R.id.btn_import_gsi);
+        btnLocalGsi = findViewById(R.id.btn_local_gsi);
+        tvLocalGsiDesc = findViewById(R.id.tv_local_gsi_desc);
 
         loadPrefs();
         setupChannelSelection();
@@ -201,6 +213,8 @@ public class MainActivity extends Activity {
         btnReturnOneUI.setOnClickListener(v -> returnToOneUI());
         btnBackupLauncher.setOnClickListener(v -> backupLauncher());
         btnRestoreLauncher.setOnClickListener(v -> restoreLauncher());
+        btnImportGsi.setOnClickListener(v -> pickGsiFile());
+        btnLocalGsi.setOnClickListener(v -> chooseGsiOnDevice());
 
         appendLog("Host: Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), "
                 + Build.MANUFACTURER + " " + Build.MODEL + " [" + Build.DEVICE + "]");
@@ -820,12 +834,7 @@ public class MainActivity extends Activity {
                 if (q >= 0) name = name.substring(0, q);
                 name = name.substring(name.lastIndexOf('/') + 1);
                 if (name.endsWith("/download")) name = name.substring(0, name.length() - "/download".length());
-                int android = 0;
-                Matcher m = matchKnown(name);
-                if (m != null) android = lineageMajorToAndroid(Integer.parseInt(m.group(1)));
-                else if (name.contains("-24.") || name.contains("lineage-24")) android = 17;
-                else if (name.contains("-23.") || name.contains("lineage-23")) android = 16;
-                return new Release(name.isEmpty() ? "custom.img" : name, customUrl, 0, android, "custom");
+                return localRelease(name.isEmpty() ? "custom.img" : name, "custom", customUrl);
             }
         }
     }
@@ -840,43 +849,67 @@ public class MainActivity extends Activity {
         return "7z";
     }
 
-    // Shell that turns whatever was downloaded into STAGE_DIR/system.raw, then
-    // records what it is. Format sniffing is done by magic bytes rather than
+    // Shell that turns whatever was downloaded or picked into STAGE_DIR/system.raw,
+    // then records what it is. Format sniffing is done by magic bytes rather than
     // trusting the file name:
-    //   sparse image  (ed 26 ff 3a at 0)     -> rejected, needs simg2img
-    //   ext4          (53 ef at 0x438)       -> fstype=ext4
-    //   erofs         (e2 e1 f5 e0 at 0x400) -> fstype=erofs
-    private String extractCmd(File archive, String ext, Release rel) {
-        return buildExtractCmd(STAGE_DIR, SYSTEM_RAW, IMAGE_INFO, archive.getAbsolutePath(), ext,
-                rel.name, rel.android, rel.source, rel.url);
+    //   sparse image  (3a ff 26 ed at 0)       -> converted to raw (simg2img or SparseTool)
+    //   super.img     (67 44 6c 61 at 0x1000)  -> rejected, it is a whole dynamic partition
+    //   ext4          (53 ef at 0x438)         -> fstype=ext4
+    //   erofs         (e2 e1 f5 e0 at 0x400)   -> fstype=erofs
+    // deleteSource is false for files the user keeps on their storage.
+    private String extractCmd(String archivePath, String ext, Release rel, boolean deleteSource) {
+        return buildExtractCmd(STAGE_DIR, SYSTEM_RAW, IMAGE_INFO, archivePath, ext,
+                rel.name, rel.android, rel.source, rel.url, deleteSource, sparseToolCmd());
+    }
+
+    // Converter invocation, used as `$cmd <in> <out>`. Prefers a device simg2img
+    // when one exists, otherwise runs SparseTool from this APK through app_process
+    // as root (the app process itself cannot open the staged files).
+    private String sparseToolCmd() {
+        String apk = getApplicationInfo().sourceDir;
+        return "unsparse() { if command -v simg2img >/dev/null 2>&1; then simg2img \"$1\" \"$2\"; "
+                + "else CLASSPATH='" + shellQuote(apk) + "' /system/bin/app_process /system/bin "
+                + SparseTool.class.getName() + " \"$1\" \"$2\"; fi; }";
     }
 
     static String buildExtractCmd(String stageDir, String systemRaw, String imageInfo, String archivePath,
-                                  String ext, String relName, int relAndroid, String relSource, String relUrl) {
+                                  String ext, String relName, int relAndroid, String relSource, String relUrl,
+                                  boolean deleteSource, String sparseFn) {
         String extractDir = stageDir + "/extract";
         String sz = stageDir + "/7zz";
         StringBuilder sb = new StringBuilder();
         sb.append("set -e; ");
         sb.append("rm -rf ").append(extractDir).append(" ").append(stageDir).append("/*.img ").append(systemRaw).append("; ");
         sb.append("mkdir -p ").append(extractDir).append("; ");
+        sb.append(sparseFn).append("; ");
+        String src = "'" + shellQuote(archivePath) + "'";
         if ("img".equals(ext)) {
-            sb.append("cp -f ").append(archivePath).append(" ").append(extractDir).append("/system.img; ");
+            // A picked .img is moved when it is our own temp copy, copied otherwise.
+            sb.append(deleteSource ? "mv -f " : "cp -f ").append(src).append(" ").append(extractDir).append("/system.img; ");
         } else {
             // 7z, zip, xz and gz are all handled by the bundled 7zz
-            sb.append(sz).append(" x -y -o").append(extractDir).append(" ").append(archivePath).append(" >/dev/null; ");
+            sb.append(sz).append(" x -y -o").append(extractDir).append(" ").append(src).append(" >/dev/null; ");
         }
         // Largest *.img anywhere in the extraction is the system image.
         sb.append("IMG=$(find ").append(extractDir).append(" -type f \\( -name '*.img' -o -name '*.raw' \\) 2>/dev/null | while read f; do echo \"$(stat -c %s \"$f\") $f\"; done | sort -n | tail -n 1 | cut -d' ' -f2-); ");
         sb.append("[ -n \"$IMG\" ] || { echo 'ERROR: no .img inside the download'; exit 2; }; ");
         sb.append("magic=$(od -An -tx1 -N4 \"$IMG\" | tr -d ' \\n'); ");
-        sb.append("if [ \"$magic\" = \"ed26ff3a\" ]; then echo 'ERROR: image is Android sparse format (needs simg2img first)'; exit 3; fi; ");
+        sb.append("if [ \"$magic\" = \"3aff26ed\" ]; then ");
+        sb.append("echo 'Android sparse image detected, converting to raw...'; ");
+        sb.append("unsparse \"$IMG\" \"$IMG.raw\" || { echo 'ERROR: sparse to raw conversion failed'; exit 3; }; ");
+        sb.append("rm -f \"$IMG\"; IMG=\"$IMG.raw\"; fi; ");
+        sb.append("if [ \"$(od -An -tx1 -j 4096 -N4 \"$IMG\" | tr -d ' \\n')\" = \"67446c61\" ]; then ");
+        sb.append("echo 'ERROR: this is a super.img (a whole dynamic partition), not a GSI. Extract system.img from it with lpunpack first.'; exit 5; fi; ");
         sb.append("fs=unknown; ");
         sb.append("[ \"$(od -An -tx1 -j 1080 -N2 \"$IMG\" | tr -d ' \\n')\" = \"53ef\" ] && fs=ext4; ");
         sb.append("[ \"$(od -An -tx1 -j 1024 -N4 \"$IMG\" | tr -d ' \\n')\" = \"e2e1f5e0\" ] && fs=erofs; ");
         sb.append("if [ \"$fs\" = unknown ]; then echo 'ERROR: image is neither ext4 nor erofs'; exit 4; fi; ");
         sb.append("mv -f \"$IMG\" ").append(systemRaw).append("; ");
         sb.append("chmod 644 ").append(systemRaw).append("; ");
-        sb.append("rm -rf ").append(extractDir).append(" ").append(archivePath).append("; ");
+        // A picked .img moved out of the app cache keeps its app_data_file label.
+        sb.append("restorecon ").append(systemRaw).append(" 2>/dev/null || true; ");
+        sb.append("rm -rf ").append(extractDir).append("; ");
+        if (deleteSource) sb.append("rm -f ").append(src).append("; ");
         sb.append("printf 'name=%s\\nandroid=%s\\nfstype=%s\\nsource=%s\\nurl=%s\\n' '")
           .append(shellQuote(relName)).append("' '").append(relAndroid).append("' \"$fs\" '")
           .append(shellQuote(relSource)).append("' '").append(shellQuote(relUrl)).append("' > ").append(imageInfo).append("; ");
@@ -885,7 +918,7 @@ public class MainActivity extends Activity {
         return sb.toString();
     }
 
-    private static String shellQuote(String s) {
+    static String shellQuote(String s) {
         return s == null ? "" : s.replace("'", "'\\''");
     }
 
@@ -898,6 +931,7 @@ public class MainActivity extends Activity {
                 tvDownloadProgress.setVisibility(View.VISIBLE);
                 tvDownloadProgress.setText("Looking up the newest release…");
                 btnDownloadLineage.setEnabled(false);
+                setLocalButtonsEnabled(false);
             });
 
             appendLog("\n[SETUP] Initializing stage directory: " + STAGE_DIR);
@@ -906,13 +940,7 @@ public class MainActivity extends Activity {
 
                 final Release rel = resolveRelease(channel, flavor);
                 appendLog("[RELEASE] " + rel.name + " (" + rel.source + ")" + (rel.bytes > 0 ? " • " + (rel.bytes / 1048576) + " MB" : ""));
-                if (rel.android != 0 && rel.android != hostAndroidMajor()) {
-                    appendLog("⚠ Image is Android " + rel.android + " but this phone runs Android " + Build.VERSION.RELEASE
-                            + ". The guest shares the host's HALs, APEXes and vendor; mismatched generations are untested.");
-                }
-                if (rel.android != 16) {
-                    appendLog("ℹ The bundled framework/services patches target Android 16 and will NOT be bound for this image.");
-                }
+                logReleaseNotes(rel);
 
                 appendLog("[SETUP] Wiping existing userdata for a fresh OOBE...");
                 runRootCmdDrained(wipeUserDataCmd());
@@ -935,30 +963,7 @@ public class MainActivity extends Activity {
                 downloadFileWithRedirects(rel.url, targetArchive, rel.bytes);
 
                 appendLog("✓ Download completed successfully! (" + (targetArchive.length() / 1048576) + " MB)");
-                setLogStatus("Extracting…");
-                mainHandler.post(() -> {
-                    pbDownload.setIndeterminate(true);
-                    tvDownloadProgress.setText("Unpacking image (" + ext + ") with ARM64 7-Zip…");
-                });
-
-                appendLog("Extracting " + targetArchive.getAbsolutePath() + " via native 7zz...");
-                String out = runRootCmdOutput(extractCmd(targetArchive, ext, rel));
-                for (String line : out.split("\n")) {
-                    if (!line.trim().isEmpty()) appendLog("  " + line);
-                }
-                if (!new File(SYSTEM_RAW).exists() || out.contains("ERROR:")) {
-                    throw new Exception("extraction failed - system.raw was not produced");
-                }
-
-                appendLog("✓ Extraction complete -> system.raw ready!");
-
-                mainHandler.post(() -> {
-                    pbDownload.setVisibility(View.GONE);
-                    tvDownloadProgress.setText(rel.name + " installed successfully!");
-                    btnDownloadLineage.setEnabled(true);
-                });
-                setLogStatus("Ready");
-                checkImageStatus();
+                installStagedImage(targetArchive.getAbsolutePath(), ext, rel, true);
 
             } catch (Exception e) {
                 appendLog("Download / setup failed: " + e.getMessage());
@@ -967,9 +972,305 @@ public class MainActivity extends Activity {
                     pbDownload.setVisibility(View.GONE);
                     tvDownloadProgress.setText("Setup failed: " + e.getMessage());
                     btnDownloadLineage.setEnabled(true);
+                    setLocalButtonsEnabled(true);
                 });
             }
         });
+    }
+
+    private void logReleaseNotes(Release rel) {
+        if (rel.android != 0 && rel.android != hostAndroidMajor()) {
+            appendLog("⚠ Image is Android " + rel.android + " but this phone runs Android " + Build.VERSION.RELEASE
+                    + ". The guest shares the host's HALs, APEXes and vendor; mismatched generations are untested.");
+        }
+        if (rel.android == 0) {
+            appendLog("ℹ Android version unknown from the file name; it is read from the image's build.prop at switch time, "
+                    + "and the bundled Android 16 patches are only used if it is SDK 36.");
+        } else if (rel.android != 16) {
+            appendLog("ℹ The bundled framework/services patches target Android 16 and will NOT be bound for this image.");
+        }
+    }
+
+    // Common tail of every install: unpack/convert the archive into system.raw as
+    // root, report, and refresh the status card. Runs on the executor thread.
+    private void installStagedImage(String archivePath, String ext, Release rel, boolean deleteSource) throws Exception {
+        setLogStatus("Extracting…");
+        mainHandler.post(() -> {
+            pbDownload.setVisibility(View.VISIBLE);
+            pbDownload.setIndeterminate(true);
+            tvDownloadProgress.setVisibility(View.VISIBLE);
+            tvDownloadProgress.setText("img".equals(ext) ? "Checking and staging image…" : "Unpacking image (" + ext + ") with ARM64 7-Zip…");
+        });
+
+        appendLog("Staging " + archivePath + ("img".equals(ext) ? "" : " via native 7zz") + "...");
+        String out = runRootCmdOutput(extractCmd(archivePath, ext, rel, deleteSource));
+        for (String line : out.split("\n")) {
+            if (!line.trim().isEmpty()) appendLog("  " + line);
+        }
+        // The app process cannot reliably stat /data/local/tmp (SELinux), so ask root.
+        boolean present = "yes".equals(runRootCmdOutput("[ -s " + SYSTEM_RAW + " ] && echo yes"));
+        if (!present || out.contains("ERROR:")) {
+            String err = "system.raw was not produced";
+            for (String line : out.split("\n")) {
+                if (line.startsWith("ERROR:")) err = line.substring(6).trim();
+            }
+            throw new Exception(err);
+        }
+
+        appendLog("✓ " + rel.name + " -> system.raw ready!");
+        mainHandler.post(() -> {
+            pbDownload.setVisibility(View.GONE);
+            tvDownloadProgress.setText(rel.name + " installed successfully!");
+            btnDownloadLineage.setEnabled(true);
+            setLocalButtonsEnabled(true);
+        });
+        setLogStatus("Ready");
+        checkImageStatus();
+    }
+
+    // --- Other GSI files: install from the phone's own storage -------------
+
+    private void setLocalButtonsEnabled(boolean on) {
+        if (btnImportGsi != null) btnImportGsi.setEnabled(on);
+        if (btnLocalGsi != null) btnLocalGsi.setEnabled(on);
+    }
+
+    // Opens the system file picker. Works for internal storage, SD cards, USB
+    // drives and cloud providers alike; no storage permission is needed.
+    private void pickGsiFile() {
+        if (!isRootGranted) {
+            appendLog("ERROR: Root privilege required to install a GSI!");
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, REQ_PICK_GSI);
+        } catch (Exception e) {
+            appendLog("No file picker available: " + e.getMessage());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_GSI || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        final Uri uri = data.getData();
+        String name = "picked.img";
+        long size = -1;
+        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                int si = c.getColumnIndex(OpenableColumns.SIZE);
+                if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni);
+                if (si >= 0 && !c.isNull(si)) size = c.getLong(si);
+            }
+        } catch (Exception ignored) {}
+        final String pickedName = fileNameOnly(name);
+        final long pickedSize = size;
+        confirmLocalInstall(pickedName, pickedSize, () -> importFromUri(uri, pickedName, pickedSize));
+    }
+
+    private static String fileNameOnly(String name) {
+        String n = name == null ? "" : name;
+        n = n.substring(n.lastIndexOf('/') + 1);
+        return n.isEmpty() ? "picked.img" : n;
+    }
+
+    private void confirmLocalInstall(String name, long size, Runnable go) {
+        String sz = size > 0 ? String.format(" (%.2f GB)", size / 1073741824.0) : "";
+        new AlertDialog.Builder(this)
+            .setTitle("Install this GSI?")
+            .setMessage(name + sz + "\n\nThis replaces the current LineageOS image and wipes its user data (One UI is not touched). "
+                    + "The file must be an arm64 system-as-root GSI: a .img (raw or sparse) or an archive containing one (.7z, .zip, .xz, .gz).")
+            .setPositiveButton("Install", (d, w) -> go.run())
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    private static Release localRelease(String name, String source, String location) {
+        int android = 0;
+        Matcher m = matchKnown(name);
+        if (m != null) android = lineageMajorToAndroid(Integer.parseInt(m.group(1)));
+        else if (name.contains("-24.") || name.contains("lineage-24")) android = 17;
+        else if (name.contains("-23.") || name.contains("lineage-23")) android = 16;
+        return new Release(name, location, 0, android, source);
+    }
+
+    // Copies the picked document into the app cache (the content URI is only
+    // readable by this app), then stages it as root and deletes the copy.
+    private void importFromUri(final Uri uri, final String name, final long size) {
+        setLocalButtonsEnabled(false);
+        executor.execute(() -> {
+            final String ext = fileExtension(name);
+            final File tmp = new File(getCacheDir(), "local_gsi." + ext);
+            try {
+                long free = getCacheDir().getUsableSpace();
+                if (size > 0 && free < size + 512L * 1048576) {
+                    throw new Exception(String.format("not enough free space to copy it (%.1f GB free, %.1f GB needed). "
+                            + "Use 'Find on device' instead, which reads the file in place.",
+                            free / 1073741824.0, (size + 512L * 1048576) / 1073741824.0));
+                }
+                Release rel = localRelease(name, "local file", uri.toString());
+                appendLog("\n[LOCAL GSI] " + name);
+                logReleaseNotes(rel);
+                appendLog("[SETUP] Wiping existing userdata for a fresh OOBE...");
+                runRootCmdDrained("mkdir -p " + STAGE_DIR + " && chmod 777 " + STAGE_DIR);
+                runRootCmdDrained(wipeUserDataCmd());
+
+                setLogStatus("Copying…");
+                mainHandler.post(() -> {
+                    pbDownload.setVisibility(View.VISIBLE);
+                    pbDownload.setIndeterminate(size <= 0);
+                    pbDownload.setMax(100);
+                    pbDownload.setProgress(0);
+                    tvDownloadProgress.setVisibility(View.VISIBLE);
+                    tvDownloadProgress.setText("Copying " + name + "…");
+                });
+                long copied = 0, last = 0;
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     OutputStream out = new FileOutputStream(tmp)) {
+                    if (in == null) throw new Exception("could not open the selected file");
+                    byte[] buf = new byte[1 << 20];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        copied += n;
+                        long now = System.currentTimeMillis();
+                        if (now - last > 250) {
+                            last = now;
+                            final long c = copied;
+                            mainHandler.post(() -> {
+                                if (size > 0) pbDownload.setProgress((int) Math.min(100, c * 100 / size));
+                                tvDownloadProgress.setText(String.format("Copying: %d MB%s", c / 1048576,
+                                        size > 0 ? " / " + (size / 1048576) + " MB" : ""));
+                            });
+                        }
+                    }
+                }
+                appendLog("✓ Copied " + (copied / 1048576) + " MB");
+                tmp.setReadable(true, false);
+                installStagedImage(tmp.getAbsolutePath(), ext, rel, true);
+            } catch (Exception e) {
+                tmp.delete();
+                localInstallFailed(e);
+            }
+        });
+    }
+
+    // Lists GSI-looking files (>= 300 MB) on internal storage and in the usual
+    // download/ROM folders, plus a manual path option. Root reads them in place,
+    // so nothing is copied and very large files work too.
+    private void chooseGsiOnDevice() {
+        if (!isRootGranted) {
+            appendLog("ERROR: Root privilege required to install a GSI!");
+            return;
+        }
+        setLocalButtonsEnabled(false);
+        appendLog("\n[LOCAL GSI] Scanning storage for GSI files...");
+        executor.execute(() -> {
+            String out = runRootCmdOutput(
+                "for d in /data/media/0 /storage/*-*; do [ -d \"$d\" ] && find \"$d\" -maxdepth 3 -type f -size +300M "
+                + "\\( -iname '*.img' -o -iname '*.img.xz' -o -iname '*.img.gz' -o -iname '*.7z' -o -iname '*.zip' -o -iname '*.xz' -o -iname '*.gz' \\) "
+                + "-not -path '*/Android/*' 2>/dev/null; done | while read f; do echo \"$(stat -c %s \"$f\")|$f\"; done");
+            final List<String> paths = new ArrayList<>();
+            final List<String> labels = new ArrayList<>();
+            for (String line : out.split("\n")) {
+                int bar = line.indexOf('|');
+                if (bar <= 0) continue;
+                long sz;
+                try { sz = Long.parseLong(line.substring(0, bar).trim()); } catch (Exception e) { continue; }
+                String path = line.substring(bar + 1);
+                paths.add(path);
+                labels.add(path.substring(path.lastIndexOf('/') + 1) + String.format("  (%.2f GB)", sz / 1073741824.0)
+                        + "\n" + displayPath(path.substring(0, path.lastIndexOf('/'))));
+            }
+            appendLog("  found " + paths.size() + " candidate file(s)");
+            mainHandler.post(() -> {
+                setLocalButtonsEnabled(true);
+                labels.add("Enter a path manually…");
+                new AlertDialog.Builder(this)
+                    .setTitle("GSI files on this phone")
+                    .setItems(labels.toArray(new String[0]), (d, which) -> {
+                        if (which == paths.size()) {
+                            promptLocalPath();
+                        } else {
+                            String path = paths.get(which);
+                            confirmLocalInstall(fileNameOnly(path), -1, () -> installFromPath(path));
+                        }
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            });
+        });
+    }
+
+    private void promptLocalPath() {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        input.setText("/sdcard/Download/");
+        input.setSelection(input.getText().length());
+        new AlertDialog.Builder(this)
+            .setTitle("Path to GSI file")
+            .setMessage("Full path to a .img or an archive containing one. Read as root, left in place.")
+            .setView(input)
+            .setPositiveButton("Install", (d, w) -> {
+                String path = rootPath(input.getText().toString().trim());
+                if (path.isEmpty() || path.endsWith("/")) {
+                    appendLog("No file given.");
+                    return;
+                }
+                installFromPath(path);
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
+    }
+
+    // /sdcard is a per-app FUSE view; root shells may not have it mounted, so
+    // map it to the backing directory.
+    static String rootPath(String p) {
+        if (p.startsWith("/sdcard/")) return "/data/media/0/" + p.substring(8);
+        if (p.startsWith("/storage/emulated/0/")) return "/data/media/0/" + p.substring(20);
+        if (p.startsWith("/storage/self/primary/")) return "/data/media/0/" + p.substring(22);
+        return p;
+    }
+
+    private static String displayPath(String p) {
+        return p.startsWith("/data/media/0") ? "/sdcard" + p.substring(13) : p;
+    }
+
+    private void installFromPath(final String path) {
+        setLocalButtonsEnabled(false);
+        executor.execute(() -> {
+            try {
+                String q = "'" + shellQuote(path) + "'";
+                String size = runRootCmdOutput("[ -f " + q + " ] && stat -c %s " + q);
+                if (size.isEmpty()) throw new Exception("file not found: " + path);
+                String name = fileNameOnly(path);
+                Release rel = localRelease(name, "local file", path);
+                appendLog("\n[LOCAL GSI] " + displayPath(path) + " (" + (Long.parseLong(size.trim()) / 1048576) + " MB)");
+                logReleaseNotes(rel);
+                appendLog("[SETUP] Wiping existing userdata for a fresh OOBE...");
+                runRootCmdDrained("mkdir -p " + STAGE_DIR + " && chmod 777 " + STAGE_DIR);
+                runRootCmdDrained(wipeUserDataCmd());
+                installStagedImage(path, fileExtension(name), rel, false);
+            } catch (Exception e) {
+                localInstallFailed(e);
+            }
+        });
+    }
+
+    private void localInstallFailed(Exception e) {
+        appendLog("Local GSI install failed: " + e.getMessage());
+        setLogStatus("Error");
+        mainHandler.post(() -> {
+            pbDownload.setVisibility(View.GONE);
+            tvDownloadProgress.setVisibility(View.VISIBLE);
+            tvDownloadProgress.setText("Setup failed: " + e.getMessage());
+            setLocalButtonsEnabled(true);
+        });
+        checkImageStatus();
     }
 
     private static int hostAndroidMajor() {

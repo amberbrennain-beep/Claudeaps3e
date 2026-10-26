@@ -75,7 +75,7 @@ echo "=== 4. Compiling Java sources ==="
 javac -source 1.8 -target 1.8 \
     -cp "$PLATFORM_JAR" \
     -d "$BUILD_DIR/classes" \
-    src/com/wewaffles/onelineage/MainActivity.java \
+    src/com/wewaffles/onelineage/*.java \
     "$BUILD_DIR/gen/com/wewaffles/onelineage/R.java"
 
 echo "=== 5. Generating Dalvik Executable (classes.dex) with d8 ==="

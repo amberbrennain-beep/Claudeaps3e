@@ -12,6 +12,8 @@
     <string name="btn_return_oneui">Return to One UI</string>
     <string name="btn_download_lineage">Download &amp; Install</string>
     <string name="btn_delete_lineage">Delete LineageOS Files</string>
+    <string name="btn_import_gsi">Pick a File</string>
+    <string name="btn_local_gsi">Find on Device</string>
     <string name="btn_backup_launcher">Backup Layout</string>
     <string name="btn_restore_launcher">Restore Layout</string>
 </resources>
