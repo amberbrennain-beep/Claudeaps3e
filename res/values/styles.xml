@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.LineageSwitcher" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/m3_background</item>
+        <item name="android:statusBarColor">@color/m3_background</item>
+        <item name="android:navigationBarColor">@color/m3_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:textColorPrimary">@color/m3_text_primary</item>
+        <item name="android:textColorSecondary">@color/m3_text_secondary</item>
+        <item name="android:colorAccent">@color/m3_primary</item>
+    </style>
+</resources>
