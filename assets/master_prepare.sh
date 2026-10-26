@@ -19,6 +19,19 @@ for i in $(seq 50 150); do
 done
 
 echo "=== 3. Mounting system.raw if needed ==="
+# The image can be ext4 (MisterZtr "EXT4" builds, Andy Yan) or erofs (MisterZtr
+# "EROFS" builds, most official LineageOS 24 images). The app records what it
+# unpacked in image_info; if that is missing, sniff the superblock magic.
+FSTYPE=$(grep '^fstype=' "$STAGE/image_info" 2>/dev/null | cut -d= -f2)
+if [ -z "$FSTYPE" ] || [ "$FSTYPE" = "unknown" ]; then
+    FSTYPE=ext4
+    [ "$(od -An -tx1 -j 1024 -N4 "$STAGE/system.raw" 2>/dev/null | tr -d ' \n')" = "e2e1f5e0" ] && FSTYPE=erofs
+fi
+echo "system.raw filesystem: $FSTYPE"
+if [ "$FSTYPE" = "erofs" ] && ! grep -qw erofs /proc/filesystems 2>/dev/null; then
+    echo "ERROR: system.raw is erofs but this kernel has no erofs support; download an EXT4 build instead."
+    exit 1
+fi
 if mount | grep -q "$ROOTFS "; then
     if [ ! -f "$ROOTFS/system/bin/sh" ] || [ ! -f "$ROOTFS/init.environ.rc" ]; then
         echo "Rootfs mount is invalid or stale. Unmounting..."
@@ -39,8 +52,40 @@ if ! mount | grep -q "$ROOTFS "; then
     LOOP=$($BB losetup -f)
     $BB losetup "$LOOP" "$STAGE/system.raw"
     echo "Using LOOP: $LOOP"
-    $BB mount -t ext4 -o ro "$LOOP" "$ROOTFS"
+    $BB mount -t "$FSTYPE" -o ro "$LOOP" "$ROOTFS"
 fi
+
+# --- Which Android generation is the host, and which is the guest? ----------
+# The patched jars/apk in assets/ were produced for a specific pair
+# (LineageOS 23.x guest = SDK 36, One UI 8.x host = SDK 36). Binding an
+# Android 16 services.jar into an Android 17 GSI would break the boot
+# classpath, so every patch below is gated on the generation it was made for.
+# Version-specific patch files use a "_<sdk>" suffix, e.g.
+# services_patched_37.jar / PermissionController_patched_37.apk; the legacy
+# un-suffixed names are treated as SDK 36.
+HOST_SDK=$(getprop ro.build.version.sdk 2>/dev/null)
+GSI_SDK=$(grep -h '^ro.build.version.sdk=' "$ROOTFS/system/build.prop" "$ROOTFS/system/etc/build.prop" 2>/dev/null | head -n 1 | cut -d= -f2)
+[ -n "$GSI_SDK" ] || GSI_SDK=$(grep -h '^ro.system.build.version.sdk=' "$ROOTFS/system/build.prop" 2>/dev/null | head -n 1 | cut -d= -f2)
+GSI_REL=$(grep -h '^ro.build.version.release=' "$ROOTFS/system/build.prop" 2>/dev/null | head -n 1 | cut -d= -f2)
+GSI_LINEAGE=$(grep -h '^ro.lineage.build.version=' "$ROOTFS/system/build.prop" 2>/dev/null | head -n 1 | cut -d= -f2)
+LEGACY_PATCH_SDK=36
+echo "Host: Android $(getprop ro.build.version.release) (SDK ${HOST_SDK:-?}), $(getprop ro.product.model) / $(getprop ro.product.device)"
+echo "Guest: LineageOS ${GSI_LINEAGE:-?} / Android ${GSI_REL:-?} (SDK ${GSI_SDK:-?})"
+if [ -n "$HOST_SDK" ] && [ -n "$GSI_SDK" ] && [ "$HOST_SDK" != "$GSI_SDK" ]; then
+    echo "!!! WARNING: host SDK $HOST_SDK != guest SDK $GSI_SDK. The guest reuses the host's"
+    echo "!!! vendor HALs, APEX set and daemons; a mismatched generation is untested."
+fi
+export HOST_SDK GSI_SDK FSTYPE
+printf 'host_sdk=%s\nguest_sdk=%s\nfstype=%s\n' "$HOST_SDK" "$GSI_SDK" "$FSTYPE" > "$STAGE/runtime_info" 2>/dev/null || true
+
+# pick_patch <base> <ext> <sdk>: echoes the patch file for that SDK, if any.
+pick_patch() {
+    if [ -f "$STAGE/${1}_patched_${3}.${2}" ]; then
+        echo "$STAGE/${1}_patched_${3}.${2}"
+    elif [ "$3" = "$LEGACY_PATCH_SDK" ] && [ -f "$STAGE/${1}_patched.${2}" ]; then
+        echo "$STAGE/${1}_patched.${2}"
+    fi
+}
 
 mkdir -p "$ROOTFS/postinstall" "$ROOTFS/dev" "$ROOTFS/proc" "$ROOTFS/sys" \
     "$ROOTFS/linkerconfig" "$ROOTFS/vendor" "$ROOTFS/odm" "$ROOTFS/vendor_dlkm" \
@@ -76,39 +121,36 @@ if [ -d /system_ext/apex ]; then
     mount | grep -q "$ROOTFS/system_ext/apex " || $BB mount --bind /system_ext/apex "$ROOTFS/system_ext/apex"
 fi
 mount | grep -q "$ROOTFS/mnt " || $BB mount --rbind /mnt "$ROOTFS/mnt"
-if [ -f "$STAGE/services_patched.jar" ]; then
-    $BB umount -l "$ROOTFS/system/framework/services.jar" 2>/dev/null || true
-    $BB mount --bind "$STAGE/services_patched.jar" "$ROOTFS/system/framework/services.jar"
-    echo "Bound services_patched.jar -> $ROOTFS/system/framework/services.jar"
-fi
-if [ -f "$STAGE/framework_patched.jar" ]; then
-    $BB umount -l "$ROOTFS/system/framework/framework.jar" 2>/dev/null || true
-    $BB mount --bind "$STAGE/framework_patched.jar" "$ROOTFS/system/framework/framework.jar"
-    echo "Bound framework_patched.jar -> $ROOTFS/system/framework/framework.jar"
-fi
-if [ -f "$STAGE/libaudio_aidl_conversion_common_cpp_patched.so" ]; then
-    $BB umount -l "$ROOTFS/system/lib64/libaudio_aidl_conversion_common_cpp.so" 2>/dev/null || true
-    $BB mount --bind "$STAGE/libaudio_aidl_conversion_common_cpp_patched.so" "$ROOTFS/system/lib64/libaudio_aidl_conversion_common_cpp.so"
-    echo "Bound libaudio_aidl_conversion_common_cpp_patched.so"
-fi
-if [ -f "$STAGE/libaudioclient_aidl_conversion_patched.so" ]; then
-    $BB umount -l "$ROOTFS/system/lib64/libaudioclient_aidl_conversion.so" 2>/dev/null || true
-    $BB mount --bind "$STAGE/libaudioclient_aidl_conversion_patched.so" "$ROOTFS/system/lib64/libaudioclient_aidl_conversion.so"
-    echo "Bound libaudioclient_aidl_conversion_patched.so"
-fi
-if [ -f "$STAGE/framework-res_patched.apk" ]; then
-    $BB umount -l "$ROOTFS/system/framework/framework-res.apk" 2>/dev/null || true
-    $BB mount --bind "$STAGE/framework-res_patched.apk" "$ROOTFS/system/framework/framework-res.apk"
-    echo "Bound framework-res_patched.apk -> $ROOTFS/system/framework/framework-res.apk"
-fi
+# Guest-side patches: these replace files INSIDE the GSI, so they must match
+# the guest's SDK.
+bind_guest_patch() {
+    # $1 = base name, $2 = extension, $3 = target path inside rootfs
+    src=$(pick_patch "$1" "$2" "$GSI_SDK")
+    if [ -n "$src" ]; then
+        $BB umount -l "$ROOTFS/$3" 2>/dev/null || true
+        $BB mount --bind "$src" "$ROOTFS/$3"
+        echo "Bound $(basename "$src") -> $ROOTFS/$3"
+    elif [ -f "$STAGE/${1}_patched.${2}" ]; then
+        echo "Skipping ${1}_patched.${2}: built for SDK $LEGACY_PATCH_SDK, guest is SDK ${GSI_SDK:-?} (provide ${1}_patched_${GSI_SDK}.${2} to enable)"
+    fi
+}
+bind_guest_patch services jar system/framework/services.jar
+bind_guest_patch framework jar system/framework/framework.jar
+bind_guest_patch libaudio_aidl_conversion_common_cpp so system/lib64/libaudio_aidl_conversion_common_cpp.so
+bind_guest_patch libaudioclient_aidl_conversion so system/lib64/libaudioclient_aidl_conversion.so
+bind_guest_patch framework-res apk system/framework/framework-res.apk
 
-if [ -f "$STAGE/PermissionController_patched.apk" ]; then
-    chmod 644 "$STAGE/PermissionController_patched.apk"
+# PermissionController is Samsung's, from the HOST apex, so this one is keyed
+# to the host SDK. (First pass; the apex set is not mounted yet, see the second
+# pass near the end.)
+PERM_PATCH=$(pick_patch PermissionController apk "$HOST_SDK")
+if [ -n "$PERM_PATCH" ]; then
+    chmod 644 "$PERM_PATCH"
     PERM_APK=$(find "$ROOTFS/apex/com.android.permission" -name "PermissionController.apk" 2>/dev/null | head -n 1)
     if [ -n "$PERM_APK" ]; then
         $BB umount -l "$PERM_APK" 2>/dev/null || true
-        $BB mount --bind "$STAGE/PermissionController_patched.apk" "$PERM_APK"
-        echo "Bound PermissionController_patched.apk -> $PERM_APK"
+        $BB mount --bind "$PERM_PATCH" "$PERM_APK"
+        echo "Bound $(basename "$PERM_PATCH") -> $PERM_APK"
     fi
 fi
 
@@ -558,10 +600,15 @@ $BB mount -t tmpfs tmpfs "$ROOTFS/apex"
 # and PMS parses the paths it reports. That is why the host's apex directories
 # are bound into this rootfs (see the /system_ext/apex and /system/apex binds):
 # every path in this list must resolve after the pivot.
-if [ -f "$STAGE/clean_apex_info_list.xml" ]; then
+# clean_apex_info_list.xml is a snapshot taken from a One UI 8.x (SDK 36) host.
+# On any other host (One UI 9 / Android 17 = SDK 37) its module versions and
+# paths no longer match what host apexd reports, so use the live list instead.
+if [ "$HOST_SDK" = "$LEGACY_PATCH_SDK" ] && [ -f "$STAGE/clean_apex_info_list.xml" ]; then
     cp "$STAGE/clean_apex_info_list.xml" "$ROOTFS/apex/apex-info-list.xml"
+    echo "Using bundled apex-info-list snapshot (host SDK $HOST_SDK)"
 else
     cp -a /apex/apex-info-list.xml "$ROOTFS/apex/" 2>/dev/null || true
+    echo "Using the host's live /apex/apex-info-list.xml (host SDK ${HOST_SDK:-?})"
 fi
 chmod 644 "$ROOTFS/apex/apex-info-list.xml" 2>/dev/null || true
 
@@ -628,6 +675,18 @@ mount_payload "ondevicepersonalization" "com.android.ondevicepersonalization"
 mount_payload "configinfrastructure" "com.android.configinfrastructure"
 mount_payload "bt" "com.android.bt"
 
+# Newer GSIs (LineageOS 24 / Android 17) may ship framework-side APEXes that
+# are not in the list above. Anything listed in $STAGE/extra_payloads.txt
+# ("<name> <apex module name>" per line, e.g. "telephonycore
+# com.android.telephonycore") is mounted from the GSI's own payload too.
+if [ -f "$STAGE/extra_payloads.txt" ]; then
+    while read -r xname xtarget rest; do
+        case "$xname" in ''|'#'*) continue ;; esac
+        [ -n "$xtarget" ] || xtarget="com.android.$xname"
+        mount_payload "$xname" "$xtarget"
+    done < "$STAGE/extra_payloads.txt"
+fi
+
 # Payload extractions above used the GSI's own /system/apex files. Now that the
 # images are cached, present the HOST's /system/apex to the container so the
 # preinstalled paths reported by host apexd all resolve (see the note above
@@ -663,16 +722,21 @@ done
 #   -> "Permission controller keeps stopping"
 # and Gallery/Phone/Calendar can never be granted anything. Bind it now that
 # /apex/com.android.permission actually exists.
-if [ -f "$STAGE/PermissionController_patched.apk" ]; then
-    chmod 644 "$STAGE/PermissionController_patched.apk" 2>/dev/null || true
+PERM_PATCH=$(pick_patch PermissionController apk "$HOST_SDK")
+if [ -n "$PERM_PATCH" ]; then
+    chmod 644 "$PERM_PATCH" 2>/dev/null || true
     for PERM_APK in $(find "$ROOTFS/apex/com.android.permission" -name "PermissionController.apk" 2>/dev/null); do
         $BB umount -l "$PERM_APK" 2>/dev/null || true
-        $BB mount --bind "$STAGE/PermissionController_patched.apk" "$PERM_APK" 2>/dev/null && echo "Bound PermissionController_patched.apk (late) -> $PERM_APK"
+        $BB mount --bind "$PERM_PATCH" "$PERM_APK" 2>/dev/null && echo "Bound $(basename "$PERM_PATCH") (late) -> $PERM_APK"
     done
-else
+elif [ "$HOST_SDK" = "$LEGACY_PATCH_SDK" ]; then
     echo "!!! WARNING: PermissionController_patched.apk missing from $STAGE"
     echo "!!! Samsung's PermissionController will crash every runtime-permission dialog"
     echo "!!! (android.permission.RANGING not defined by platform)"
+else
+    echo "No PermissionController patch for host SDK ${HOST_SDK:-?}; using Samsung's as-is."
+    echo "(The RANGING crash was specific to a One UI 8.x PermissionController on a LineageOS 23 guest."
+    echo " If permission dialogs crash, build PermissionController_patched_${HOST_SDK}.apk from this host's apex.)"
 fi
 
 echo "=== ALL MOUNTS PREPARED SUCCESSFULLY ==="

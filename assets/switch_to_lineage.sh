@@ -20,7 +20,8 @@ set_prop() {
 
 BACKUP_DIR="/data/local/tmp/lineage_backups"
 
-echo "=== LINEAGEOS 23.2 TAKEOVER STARTING ==="
+IMG_NAME=$(grep '^name=' "$STAGE/image_info" 2>/dev/null | cut -d= -f2-)
+echo "=== LINEAGEOS TAKEOVER STARTING (${IMG_NAME:-system.raw}) ==="
 
 # Put SELinux in permissive mode for the duration of the takeover. The guest
 # userspace is a foreign, unlabelled-for-this-policy userspace: its

@@ -2,18 +2,23 @@ package com.wewaffles.onelineage;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.TextView;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -21,8 +26,12 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
 
@@ -31,12 +40,42 @@ public class MainActivity extends Activity {
         GAPPS
     }
 
+    // Which LineageOS line to install. The Android 16 line is what the
+    // patched framework/services jars shipped in assets/ were built against;
+    // the Android 17 line (LineageOS 24) runs without those patches until a
+    // matching set is produced (see README "Android 17").
+    public enum Channel {
+        LINEAGE_23_A16,
+        LINEAGE_24_A17,
+        CUSTOM
+    }
+
+    // One resolved download: where it lives, how big it is, and which Android
+    // generation it is, so the takeover scripts can gate the Android-16-only
+    // patches on it.
+    static final class Release {
+        final String name;
+        final String url;
+        final long bytes;
+        final int android;   // 16, 17, or 0 when unknown
+        final String source;
+
+        Release(String name, String url, long bytes, int android, String source) {
+            this.name = name;
+            this.url = url;
+            this.bytes = bytes;
+            this.android = android;
+            this.source = source;
+        }
+    }
+
     private TextView tvRootStatus;
     private TextView tvOsStatus;
     private TextView tvImageStatus;
     private TextView tvHeaderSubtitle;
     private TextView tvDownloadDesc;
     private TextView tvDownloadProgress;
+    private TextView tvChannelDesc;
     private ProgressBar pbDownload;
     private TextView tvConsoleLog;
     private TextView tvLogStatus;
@@ -45,6 +84,14 @@ public class MainActivity extends Activity {
     private LinearLayout cardFlavorGapps;
     private RadioButton rbVanilla;
     private RadioButton rbGapps;
+
+    private LinearLayout cardChannelA16;
+    private LinearLayout cardChannelA17;
+    private LinearLayout cardChannelCustom;
+    private RadioButton rbChannelA16;
+    private RadioButton rbChannelA17;
+    private RadioButton rbChannelCustom;
+    private TextView tvChannelCustomDesc;
 
     private Button btnDownloadLineage;
     private Button btnDeleteLineage;
@@ -58,12 +105,51 @@ public class MainActivity extends Activity {
     private boolean isRootGranted = false;
     private String suBinary = "su";
     private Flavor selectedFlavor = Flavor.VANILLA;
+    private Channel selectedChannel = Channel.LINEAGE_23_A16;
+    private String customUrl = "";
+
+    private static final String PREFS = "onelineage";
+    private static final String PREF_CHANNEL = "channel";
+    private static final String PREF_FLAVOR = "flavor";
+    private static final String PREF_CUSTOM_URL = "custom_url";
 
     private static final String STAGE_DIR = "/data/local/tmp/lineage_stage";
     private static final String SYSTEM_RAW = STAGE_DIR + "/system.raw";
+    // Written next to system.raw after every install: the takeover scripts read
+    // it to learn which Android generation the image is and which filesystem
+    // it uses (ext4 or erofs).
+    private static final String IMAGE_INFO = STAGE_DIR + "/image_info";
 
-    private static final String URL_VANILLA = "https://downloads.sourceforge.net/project/misterztr-gsi/LineageOS/Android%2016/LineageOS-23.2-20260524-VANILLA-EXT4-GSI.7z?use_mirror=autoselect";
-    private static final String URL_GAPPS = "https://downloads.sourceforge.net/project/misterztr-gsi/LineageOS/Android%2016/LineageOS-23.2-20260524-GAPPS-EXT4-GSI.7z?use_mirror=autoselect";
+    // Android SDK levels of the two LineageOS lines this app knows about.
+    private static final int SDK_ANDROID_16 = 36;
+    private static final int SDK_ANDROID_17 = 37;
+
+    // --- Release discovery -------------------------------------------------
+    // SourceForge publishes a per-folder RSS feed with the download link and
+    // the byte size of every file. Discovery walks those feeds and picks the
+    // newest build matching the chosen flavor, so a new upload (or the first
+    // Android 17 upload) is picked up without rebuilding the app.
+    private static final String SF_RSS = "https://sourceforge.net/projects/%s/rss?path=%s";
+
+    // File-name patterns of the GSI builders this app knows. Group 1 is always
+    // the LineageOS major, group 2 the minor, group 3 the YYYYMMDD stamp and
+    // group 4 the flavor token.
+    // MisterZtr: LineageOS-23.2-20260524-VANILLA-EXT4-GSI.7z
+    private static final Pattern MISTERZTR_FILE =
+            Pattern.compile("LineageOS-(2[34])\\.(\\d+)-(\\d{8})-(VANILLA|GAPPS)-(EXT4|EROFS)-GSI\\.7z");
+    // MisterZtr "(native)" folder: LineageOS-23.2-20260124-UNOFFICIAL-gsi_arm64_bvNE.7z (bv = vanilla, bg = gapps)
+    private static final Pattern MISTERZTR_NATIVE_FILE =
+            Pattern.compile("LineageOS-(2[34])\\.(\\d+)-(\\d{8})-UNOFFICIAL-gsi_arm64_b([vg])N[A-Za-z]*\\.7z");
+    // Andy Yan: lineage-22.2-20250621-UNOFFICIAL-gsi_arm64_vN.img.gz, ..._gN-signed.img.gz
+    // ("-personal" builds are deliberately not matched).
+    private static final Pattern ANDYYAN_FILE =
+            Pattern.compile("lineage-(2[34])\\.(\\d+)-(\\d{8})-UNOFFICIAL-gsi_arm64_([vg])N(?:-signed)?\\.img\\.(?:gz|xz)");
+    private static final Pattern[] KNOWN_FILES = {MISTERZTR_FILE, MISTERZTR_NATIVE_FILE, ANDYYAN_FILE};
+
+    // Last-resort fallback for the Android 16 line if SourceForge's feed is
+    // unreachable: the build the shipped patches were made against.
+    private static final String URL_VANILLA_A16 = "https://downloads.sourceforge.net/project/misterztr-gsi/LineageOS/Android%2016/LineageOS-23.2-20260524-VANILLA-EXT4-GSI.7z?use_mirror=autoselect";
+    private static final String URL_GAPPS_A16 = "https://downloads.sourceforge.net/project/misterztr-gsi/LineageOS/Android%2016/LineageOS-23.2-20260524-GAPPS-EXT4-GSI.7z?use_mirror=autoselect";
     private static final long ESTIMATED_VANILLA_BYTES = 922022276L;
     private static final long ESTIMATED_GAPPS_BYTES = 1167859370L;
 
@@ -78,6 +164,7 @@ public class MainActivity extends Activity {
         tvHeaderSubtitle = findViewById(R.id.tv_header_subtitle);
         tvDownloadDesc = findViewById(R.id.tv_download_desc);
         tvDownloadProgress = findViewById(R.id.tv_download_progress);
+        tvChannelDesc = findViewById(R.id.tv_channel_desc);
         pbDownload = findViewById(R.id.pb_download);
         tvConsoleLog = findViewById(R.id.tv_console_log);
         tvLogStatus = findViewById(R.id.tv_log_status);
@@ -87,6 +174,14 @@ public class MainActivity extends Activity {
         rbVanilla = findViewById(R.id.rb_vanilla);
         rbGapps = findViewById(R.id.rb_gapps);
 
+        cardChannelA16 = findViewById(R.id.card_channel_a16);
+        cardChannelA17 = findViewById(R.id.card_channel_a17);
+        cardChannelCustom = findViewById(R.id.card_channel_custom);
+        rbChannelA16 = findViewById(R.id.rb_channel_a16);
+        rbChannelA17 = findViewById(R.id.rb_channel_a17);
+        rbChannelCustom = findViewById(R.id.rb_channel_custom);
+        tvChannelCustomDesc = findViewById(R.id.tv_channel_custom_desc);
+
         btnDownloadLineage = findViewById(R.id.btn_download_lineage);
         btnDeleteLineage = findViewById(R.id.btn_delete_lineage);
         btnBootLineage = findViewById(R.id.btn_boot_lineage);
@@ -94,6 +189,8 @@ public class MainActivity extends Activity {
         btnBackupLauncher = findViewById(R.id.btn_backup_launcher);
         btnRestoreLauncher = findViewById(R.id.btn_restore_launcher);
 
+        loadPrefs();
+        setupChannelSelection();
         setupFlavorSelection();
         extractAssets();
         checkRootAndSystem();
@@ -104,12 +201,114 @@ public class MainActivity extends Activity {
         btnReturnOneUI.setOnClickListener(v -> returnToOneUI());
         btnBackupLauncher.setOnClickListener(v -> backupLauncher());
         btnRestoreLauncher.setOnClickListener(v -> restoreLauncher());
+
+        appendLog("Host: Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), "
+                + Build.MANUFACTURER + " " + Build.MODEL + " [" + Build.DEVICE + "]");
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         checkRootAndSystem();
+    }
+
+    // --- Preferences -------------------------------------------------------
+
+    private void loadPrefs() {
+        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        customUrl = p.getString(PREF_CUSTOM_URL, "");
+        try {
+            selectedChannel = Channel.valueOf(p.getString(PREF_CHANNEL, defaultChannel().name()));
+        } catch (Exception e) {
+            selectedChannel = defaultChannel();
+        }
+        try {
+            selectedFlavor = Flavor.valueOf(p.getString(PREF_FLAVOR, Flavor.GAPPS.name()));
+        } catch (Exception e) {
+            selectedFlavor = Flavor.GAPPS;
+        }
+    }
+
+    private void savePrefs() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PREF_CHANNEL, selectedChannel.name())
+                .putString(PREF_FLAVOR, selectedFlavor.name())
+                .putString(PREF_CUSTOM_URL, customUrl)
+                .apply();
+    }
+
+    // Default to the LineageOS line that matches the host's Android version:
+    // a One UI 9 (Android 17) host gets the LineageOS 24 channel, everything
+    // else gets the proven Android 16 line.
+    private Channel defaultChannel() {
+        return Build.VERSION.SDK_INT >= SDK_ANDROID_17 ? Channel.LINEAGE_24_A17 : Channel.LINEAGE_23_A16;
+    }
+
+    // --- Channel / flavor selection -----------------------------------------
+
+    private void setupChannelSelection() {
+        cardChannelA16.setOnClickListener(v -> selectChannel(Channel.LINEAGE_23_A16));
+        cardChannelA17.setOnClickListener(v -> selectChannel(Channel.LINEAGE_24_A17));
+        cardChannelCustom.setOnClickListener(v -> promptCustomUrl());
+        selectChannel(selectedChannel);
+    }
+
+    private void selectChannel(Channel channel) {
+        selectedChannel = channel;
+        rbChannelA16.setChecked(channel == Channel.LINEAGE_23_A16);
+        rbChannelA17.setChecked(channel == Channel.LINEAGE_24_A17);
+        rbChannelCustom.setChecked(channel == Channel.CUSTOM);
+        cardChannelA16.setBackgroundResource(channel == Channel.LINEAGE_23_A16 ? R.drawable.radio_item_selected : R.drawable.radio_item_unselected);
+        cardChannelA17.setBackgroundResource(channel == Channel.LINEAGE_24_A17 ? R.drawable.radio_item_selected : R.drawable.radio_item_unselected);
+        cardChannelCustom.setBackgroundResource(channel == Channel.CUSTOM ? R.drawable.radio_item_selected : R.drawable.radio_item_unselected);
+
+        if (tvChannelCustomDesc != null) {
+            tvChannelCustomDesc.setText(customUrl.isEmpty()
+                    ? "Tap to paste a direct link to a GSI (.7z, .img.xz, .zip or .img)"
+                    : customUrl);
+        }
+
+        boolean flavorApplies = channel != Channel.CUSTOM;
+        cardFlavorVanilla.setAlpha(flavorApplies ? 1.0f : 0.4f);
+        cardFlavorGapps.setAlpha(flavorApplies ? 1.0f : 0.4f);
+
+        if (tvChannelDesc != null) {
+            switch (channel) {
+                case LINEAGE_23_A16:
+                    tvChannelDesc.setText("LineageOS 23.x on Android 16 • the line the bundled framework patches were made for"
+                            + (Build.VERSION.SDK_INT >= SDK_ANDROID_17 ? "\n⚠ This phone runs Android " + Build.VERSION.RELEASE + "; expect APEX/HAL mismatches" : ""));
+                    break;
+                case LINEAGE_24_A17:
+                    tvChannelDesc.setText("LineageOS 24 on Android 17 • newest build is looked up on SourceForge at download time; bundled Android 16 patches are skipped");
+                    break;
+                case CUSTOM:
+                    tvChannelDesc.setText("Any arm64 system-as-root GSI from a direct URL");
+                    break;
+            }
+        }
+        savePrefs();
+    }
+
+    private void promptCustomUrl() {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        input.setHint("https://…/lineage-24.0-…-arm64_bvN.img.xz");
+        input.setText(customUrl);
+        new AlertDialog.Builder(this)
+                .setTitle("Custom GSI URL")
+                .setMessage("Direct download link to an arm64 system-as-root GSI. Supported: .7z, .img.xz, .zip or a raw .img (ext4 or erofs, not sparse).")
+                .setView(input)
+                .setPositiveButton("Use", (d, w) -> {
+                    String s = input.getText().toString().trim();
+                    if (s.isEmpty()) {
+                        appendLog("Custom URL left empty - keeping current channel.");
+                        return;
+                    }
+                    customUrl = s;
+                    selectChannel(Channel.CUSTOM);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void setupFlavorSelection() {
@@ -119,7 +318,7 @@ public class MainActivity extends Activity {
         cardFlavorVanilla.setOnClickListener(clickVanilla);
         cardFlavorGapps.setOnClickListener(clickGapps);
 
-        selectFlavor(Flavor.GAPPS);
+        selectFlavor(selectedFlavor);
     }
 
     private void selectFlavor(Flavor flavor) {
@@ -135,9 +334,10 @@ public class MainActivity extends Activity {
                 tvDownloadDesc.setText("Vanilla: The lightweight option");
                 break;
             case GAPPS:
-                tvDownloadDesc.setText("MindTheGapps: LineageOS 23.2 + Google Play Store & Services.");
+                tvDownloadDesc.setText("GApps: LineageOS + Google Play Store & Services.");
                 break;
         }
+        savePrefs();
     }
 
     private void appendLog(final String text) {
@@ -170,6 +370,23 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return -1;
         }
+    }
+
+    // Same as runRootCmdDrained but returns the merged output (trimmed).
+    private String runRootCmdOutput(String cmd) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            ProcessBuilder pb = new ProcessBuilder(suBinary, "-c", cmd);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            p.waitFor();
+        } catch (Exception ignored) {}
+        return sb.toString().trim();
     }
 
     private void setLogStatus(final String status) {
@@ -237,7 +454,7 @@ public class MainActivity extends Activity {
                             tvHeaderSubtitle.setText("Dual Userspace Switcher • LineageOS");
                         }
                     } else {
-                        tvOsStatus.setText("Current Userspace: Samsung One UI (Stock)");
+                        tvOsStatus.setText("Current Userspace: Samsung One UI (Android " + Build.VERSION.RELEASE + ")");
                         tvOsStatus.setTextColor(Color.parseColor("#FFD54F"));
                         if (tvHeaderSubtitle != null) {
                             tvHeaderSubtitle.setText("Dual Userspace Switcher • One UI");
@@ -260,9 +477,17 @@ public class MainActivity extends Activity {
                 String out = reader.readLine();
                 p.waitFor();
 
+                final String info = runRootCmdOutput("cat " + IMAGE_INFO + " 2>/dev/null");
+                final String imgName = infoField(info, "name");
+                final String imgAndroid = infoField(info, "android");
+                final String imgFs = infoField(info, "fstype");
+
                 mainHandler.post(() -> {
                     if (out != null && !out.contains("MISSING") && !out.trim().isEmpty()) {
-                        tvImageStatus.setText("Image: Installed & Ready (" + out.trim().replaceAll("\\s+", " ") + ")");
+                        String label = imgName.isEmpty() ? "" : imgName;
+                        if (!imgAndroid.isEmpty() && !"0".equals(imgAndroid)) label += " • Android " + imgAndroid;
+                        if (!imgFs.isEmpty()) label += " • " + imgFs;
+                        tvImageStatus.setText("Image: Installed & Ready" + (label.isEmpty() ? "" : " (" + label.trim() + ")"));
                         tvImageStatus.setTextColor(Color.parseColor("#A5D6A7"));
                         btnDownloadLineage.setText("Reinstall Image");
                         btnBootLineage.setEnabled(true);
@@ -279,6 +504,14 @@ public class MainActivity extends Activity {
                 mainHandler.post(() -> tvImageStatus.setText("Image Check Error: " + e.getMessage()));
             }
         });
+    }
+
+    private static String infoField(String info, String key) {
+        if (info == null) return "";
+        for (String line : info.split("\n")) {
+            if (line.startsWith(key + "=")) return line.substring(key.length() + 1).trim();
+        }
+        return "";
     }
 
     private void extractAssets() {
@@ -332,10 +565,16 @@ public class MainActivity extends Activity {
             appendLog("ERROR: Root privilege required to set up LineageOS!");
             return;
         }
-        startNetworkDownload(selectedFlavor);
+        if (selectedChannel == Channel.CUSTOM && customUrl.isEmpty()) {
+            promptCustomUrl();
+            return;
+        }
+        startNetworkDownload(selectedChannel, selectedFlavor);
     }
 
-    private void downloadFileWithRedirects(String initialUrl, File targetFile, long expectedBytes) throws Exception {
+    // --- HTTP helpers ------------------------------------------------------
+
+    private HttpURLConnection openWithRedirects(String initialUrl) throws Exception {
         String currentUrl = initialUrl;
         HttpURLConnection conn = null;
         int redirectCount = 0;
@@ -370,13 +609,32 @@ public class MainActivity extends Activity {
             if (code != HttpURLConnection.HTTP_OK) {
                 throw new Exception("HTTP server error code: " + code);
             }
-
-            break;
+            return conn;
         }
+        throw new Exception("Too many redirects: " + redirectCount);
+    }
 
-        if (redirectCount >= MAX_REDIRECTS || conn == null) {
-            throw new Exception("Too many redirects: " + redirectCount);
+    // Small text fetch (RSS feeds), capped at 4 MB.
+    private String httpGetText(String url) throws Exception {
+        HttpURLConnection conn = openWithRedirects(url);
+        try (InputStream in = conn.getInputStream()) {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            long total = 0;
+            while ((n = in.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+                total += n;
+                if (total > 4L * 1024 * 1024) break;
+            }
+            return bos.toString("UTF-8");
+        } finally {
+            conn.disconnect();
         }
+    }
+
+    private void downloadFileWithRedirects(String initialUrl, File targetFile, long expectedBytes) throws Exception {
+        HttpURLConnection conn = openWithRedirects(initialUrl);
 
         long contentLength = -1;
         try {
@@ -426,26 +684,240 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void startNetworkDownload(final Flavor flavor) {
+    // --- Release discovery -------------------------------------------------
+
+    // Parses a SourceForge folder RSS feed into (link, filesize) pairs and keeps
+    // the ones whose file name matches one of the known builder patterns.
+    static List<Release> parseSourceForgeRss(String xml, String source) {
+        List<Release> out = new ArrayList<>();
+        if (xml == null) return out;
+        Pattern item = Pattern.compile("<item>(.*?)</item>", Pattern.DOTALL);
+        Pattern link = Pattern.compile("<link>\\s*([^<\\s]+)\\s*</link>");
+        Pattern size = Pattern.compile("filesize=\"(\\d+)\"");
+        Matcher mi = item.matcher(xml);
+        while (mi.find()) {
+            String block = mi.group(1);
+            Matcher ml = link.matcher(block);
+            if (!ml.find()) continue;
+            String url = ml.group(1);
+            Matcher mf = matchKnown(url);
+            if (mf == null) continue;
+            long bytes = 0;
+            Matcher ms = size.matcher(block);
+            if (ms.find()) {
+                try { bytes = Long.parseLong(ms.group(1)); } catch (Exception ignored) {}
+            }
+            int major = Integer.parseInt(mf.group(1));
+            out.add(new Release(mf.group(), url, bytes, lineageMajorToAndroid(major), source));
+        }
+        return out;
+    }
+
+    // Returns a successful matcher of the first known pattern, or null.
+    private static Matcher matchKnown(String name) {
+        if (name == null) return null;
+        for (Pattern p : KNOWN_FILES) {
+            Matcher m = p.matcher(name);
+            if (m.find()) return m;
+        }
+        return null;
+    }
+
+    private static int lineageMajorToAndroid(int lineageMajor) {
+        switch (lineageMajor) {
+            case 23: return 16;
+            case 24: return 17;
+            default: return 0;
+        }
+    }
+
+    private static String encodePath(String folder) {
+        return folder.replace(" ", "%20").replace("(", "%28").replace(")", "%29");
+    }
+
+    // Newest build (by the YYYYMMDD stamp in the file name) that matches the
+    // flavor. Among MisterZtr builds EXT4 is preferred over EROFS when both
+    // exist for the same date, since ext4 is the format the takeover has been
+    // exercised with (erofs is supported, see master_prepare.sh).
+    static Release pickNewest(List<Release> candidates, Flavor flavor) {
+        Release best = null;
+        String bestKey = "";
+        for (Release r : candidates) {
+            Matcher m = matchKnown(r.name);
+            if (m == null) continue;
+            String date = m.group(3);
+            String tok = m.group(4);
+            boolean isGapps = "GAPPS".equals(tok) || "g".equals(tok);
+            if ((flavor == Flavor.GAPPS) != isGapps) continue;
+            String fsRank = (m.pattern() == MISTERZTR_FILE && !"EXT4".equals(m.group(5))) ? "0" : "1";
+            String key = date + fsRank;
+            if (best == null || key.compareTo(bestKey) > 0) {
+                best = r;
+                bestKey = key;
+            }
+        }
+        return best;
+    }
+
+    private Release discoverMisterZtr(String folder, Flavor flavor) {
+        try {
+            String url = String.format(SF_RSS, "misterztr-gsi", encodePath(folder));
+            appendLog("Looking up " + folder + " on SourceForge (MisterZtr)...");
+            String xml = httpGetText(url);
+            Release r = pickNewest(parseSourceForgeRss(xml, "MisterZtr " + folder), flavor);
+            if (r == null) appendLog("  no " + flavor.name() + " build in " + folder);
+            return r;
+        } catch (Exception e) {
+            appendLog("  lookup failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private Release discoverAndyYan(String folder, Flavor flavor) {
+        try {
+            String url = String.format(SF_RSS, "andyyan-gsi", encodePath(folder));
+            appendLog("Looking up " + folder + " on SourceForge (Andy Yan)...");
+            String xml = httpGetText(url);
+            Release r = pickNewest(parseSourceForgeRss(xml, "AndyYan " + folder), flavor);
+            if (r == null) appendLog("  no " + flavor.name() + " build in " + folder);
+            return r;
+        } catch (Exception e) {
+            appendLog("  lookup failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private Release resolveRelease(Channel channel, Flavor flavor) throws Exception {
+        switch (channel) {
+            case LINEAGE_23_A16: {
+                Release r = discoverMisterZtr("/LineageOS/Android 16", flavor);
+                if (r != null) return r;
+                appendLog("Falling back to the pinned LineageOS 23.2 (2026-05-24) build.");
+                return flavor == Flavor.GAPPS
+                        ? new Release("LineageOS-23.2-20260524-GAPPS-EXT4-GSI.7z", URL_GAPPS_A16, ESTIMATED_GAPPS_BYTES, 16, "pinned")
+                        : new Release("LineageOS-23.2-20260524-VANILLA-EXT4-GSI.7z", URL_VANILLA_A16, ESTIMATED_VANILLA_BYTES, 16, "pinned");
+            }
+            case LINEAGE_24_A17: {
+                // Folder names follow the maintainers' existing conventions
+                // ("Android 16", "Android 16(native)", "lineage-21-td" ...).
+                String[] misterztrFolders = {"/LineageOS/Android 17", "/LineageOS/Android 17(native)"};
+                for (String f : misterztrFolders) {
+                    Release r = discoverMisterZtr(f, flavor);
+                    if (r != null && r.android == 17) return r;
+                }
+                String[] andyFolders = {"/lineage-24", "/lineage-24-td", "/lineage-24-light"};
+                for (String f : andyFolders) {
+                    Release r = discoverAndyYan(f, flavor);
+                    if (r != null && r.android == 17) return r;
+                }
+                throw new Exception("No LineageOS 24 (Android 17) GSI is published yet on the MisterZtr or Andy Yan SourceForge projects. "
+                        + "Check back later, or choose 'Custom URL' and paste a link to an Android 17 arm64 GSI.");
+            }
+            case CUSTOM:
+            default: {
+                String name = customUrl;
+                int q = name.indexOf('?');
+                if (q >= 0) name = name.substring(0, q);
+                name = name.substring(name.lastIndexOf('/') + 1);
+                if (name.endsWith("/download")) name = name.substring(0, name.length() - "/download".length());
+                int android = 0;
+                Matcher m = matchKnown(name);
+                if (m != null) android = lineageMajorToAndroid(Integer.parseInt(m.group(1)));
+                else if (name.contains("-24.") || name.contains("lineage-24")) android = 17;
+                else if (name.contains("-23.") || name.contains("lineage-23")) android = 16;
+                return new Release(name.isEmpty() ? "custom.img" : name, customUrl, 0, android, "custom");
+            }
+        }
+    }
+
+    static String fileExtension(String name) {
+        String n = name.toLowerCase();
+        if (n.endsWith(".xz")) return "xz";
+        if (n.endsWith(".gz")) return "gz";
+        if (n.endsWith(".7z")) return "7z";
+        if (n.endsWith(".zip")) return "zip";
+        if (n.endsWith(".img")) return "img";
+        return "7z";
+    }
+
+    // Shell that turns whatever was downloaded into STAGE_DIR/system.raw, then
+    // records what it is. Format sniffing is done by magic bytes rather than
+    // trusting the file name:
+    //   sparse image  (ed 26 ff 3a at 0)     -> rejected, needs simg2img
+    //   ext4          (53 ef at 0x438)       -> fstype=ext4
+    //   erofs         (e2 e1 f5 e0 at 0x400) -> fstype=erofs
+    private String extractCmd(File archive, String ext, Release rel) {
+        return buildExtractCmd(STAGE_DIR, SYSTEM_RAW, IMAGE_INFO, archive.getAbsolutePath(), ext,
+                rel.name, rel.android, rel.source, rel.url);
+    }
+
+    static String buildExtractCmd(String stageDir, String systemRaw, String imageInfo, String archivePath,
+                                  String ext, String relName, int relAndroid, String relSource, String relUrl) {
+        String extractDir = stageDir + "/extract";
+        String sz = stageDir + "/7zz";
+        StringBuilder sb = new StringBuilder();
+        sb.append("set -e; ");
+        sb.append("rm -rf ").append(extractDir).append(" ").append(stageDir).append("/*.img ").append(systemRaw).append("; ");
+        sb.append("mkdir -p ").append(extractDir).append("; ");
+        if ("img".equals(ext)) {
+            sb.append("cp -f ").append(archivePath).append(" ").append(extractDir).append("/system.img; ");
+        } else {
+            // 7z, zip, xz and gz are all handled by the bundled 7zz
+            sb.append(sz).append(" x -y -o").append(extractDir).append(" ").append(archivePath).append(" >/dev/null; ");
+        }
+        // Largest *.img anywhere in the extraction is the system image.
+        sb.append("IMG=$(find ").append(extractDir).append(" -type f \\( -name '*.img' -o -name '*.raw' \\) 2>/dev/null | while read f; do echo \"$(stat -c %s \"$f\") $f\"; done | sort -n | tail -n 1 | cut -d' ' -f2-); ");
+        sb.append("[ -n \"$IMG\" ] || { echo 'ERROR: no .img inside the download'; exit 2; }; ");
+        sb.append("magic=$(od -An -tx1 -N4 \"$IMG\" | tr -d ' \\n'); ");
+        sb.append("if [ \"$magic\" = \"ed26ff3a\" ]; then echo 'ERROR: image is Android sparse format (needs simg2img first)'; exit 3; fi; ");
+        sb.append("fs=unknown; ");
+        sb.append("[ \"$(od -An -tx1 -j 1080 -N2 \"$IMG\" | tr -d ' \\n')\" = \"53ef\" ] && fs=ext4; ");
+        sb.append("[ \"$(od -An -tx1 -j 1024 -N4 \"$IMG\" | tr -d ' \\n')\" = \"e2e1f5e0\" ] && fs=erofs; ");
+        sb.append("if [ \"$fs\" = unknown ]; then echo 'ERROR: image is neither ext4 nor erofs'; exit 4; fi; ");
+        sb.append("mv -f \"$IMG\" ").append(systemRaw).append("; ");
+        sb.append("chmod 644 ").append(systemRaw).append("; ");
+        sb.append("rm -rf ").append(extractDir).append(" ").append(archivePath).append("; ");
+        sb.append("printf 'name=%s\\nandroid=%s\\nfstype=%s\\nsource=%s\\nurl=%s\\n' '")
+          .append(shellQuote(relName)).append("' '").append(relAndroid).append("' \"$fs\" '")
+          .append(shellQuote(relSource)).append("' '").append(shellQuote(relUrl)).append("' > ").append(imageInfo).append("; ");
+        sb.append("chmod 644 ").append(imageInfo).append("; ");
+        sb.append("echo \"fstype=$fs\"");
+        return sb.toString();
+    }
+
+    private static String shellQuote(String s) {
+        return s == null ? "" : s.replace("'", "'\\''");
+    }
+
+    private void startNetworkDownload(final Channel channel, final Flavor flavor) {
         executor.execute(() -> {
             setLogStatus("Preparing…");
             mainHandler.post(() -> {
                 pbDownload.setVisibility(View.VISIBLE);
-                pbDownload.setIndeterminate(false);
-                pbDownload.setProgress(0);
+                pbDownload.setIndeterminate(true);
                 tvDownloadProgress.setVisibility(View.VISIBLE);
-                tvDownloadProgress.setText("Connecting to official SourceForge release…");
+                tvDownloadProgress.setText("Looking up the newest release…");
                 btnDownloadLineage.setEnabled(false);
             });
 
             appendLog("\n[SETUP] Initializing stage directory: " + STAGE_DIR);
             try {
                 runRootCmdDrained("mkdir -p " + STAGE_DIR + " && chmod 777 " + STAGE_DIR);
+
+                final Release rel = resolveRelease(channel, flavor);
+                appendLog("[RELEASE] " + rel.name + " (" + rel.source + ")" + (rel.bytes > 0 ? " • " + (rel.bytes / 1048576) + " MB" : ""));
+                if (rel.android != 0 && rel.android != hostAndroidMajor()) {
+                    appendLog("⚠ Image is Android " + rel.android + " but this phone runs Android " + Build.VERSION.RELEASE
+                            + ". The guest shares the host's HALs, APEXes and vendor; mismatched generations are untested.");
+                }
+                if (rel.android != 16) {
+                    appendLog("ℹ The bundled framework/services patches target Android 16 and will NOT be bound for this image.");
+                }
+
                 appendLog("[SETUP] Wiping existing userdata for a fresh OOBE...");
                 runRootCmdDrained(wipeUserDataCmd());
 
-                String downloadUrl = (flavor == Flavor.GAPPS) ? URL_GAPPS : URL_VANILLA;
-                final long totalBytes = (flavor == Flavor.GAPPS) ? ESTIMATED_GAPPS_BYTES : ESTIMATED_VANILLA_BYTES;
+                final String ext = fileExtension(rel.name);
                 // Download into the app's own cache dir, NOT STAGE_DIR directly: this
                 // process writes as the unprivileged app, and /data/local/tmp paths
                 // created by root are labeled shell_data_file, which SELinux blocks
@@ -453,36 +925,36 @@ public class MainActivity extends Activity {
                 // actual cause of "lineage_dl.7z: open failed: EACCES"). su (used below
                 // for extraction) can read the app's cache dir fine, same as
                 // extractAssets() already does for the other staged files.
-                final File targetArchive = new File(getCacheDir(), "lineage_dl.7z");
+                final File targetArchive = new File(getCacheDir(), "lineage_dl." + ext);
 
                 appendLog("[NETWORK DOWNLOAD] Fetching " + flavor.name() + " edition directly via native HTTP engine...");
-                appendLog("URL: " + downloadUrl);
+                appendLog("URL: " + rel.url);
                 setLogStatus("Downloading…");
+                mainHandler.post(() -> pbDownload.setIndeterminate(false));
 
-                downloadFileWithRedirects(downloadUrl, targetArchive, totalBytes);
+                downloadFileWithRedirects(rel.url, targetArchive, rel.bytes);
 
                 appendLog("✓ Download completed successfully! (" + (targetArchive.length() / 1048576) + " MB)");
                 setLogStatus("Extracting…");
                 mainHandler.post(() -> {
                     pbDownload.setIndeterminate(true);
-                    tvDownloadProgress.setText("Decompressing image with ARM64 7-Zip…");
+                    tvDownloadProgress.setText("Unpacking image (" + ext + ") with ARM64 7-Zip…");
                 });
 
                 appendLog("Extracting " + targetArchive.getAbsolutePath() + " via native 7zz...");
-                String extractCmd = "rm -f " + STAGE_DIR + "/*.img " + SYSTEM_RAW + "; " +
-                                   STAGE_DIR + "/7zz x -y -o" + STAGE_DIR + " " + targetArchive.getAbsolutePath() + " && " +
-                                   "mv -f " + STAGE_DIR + "/*.img " + SYSTEM_RAW + " && " +
-                                   "rm -f " + targetArchive.getAbsolutePath() + " && chmod 644 " + SYSTEM_RAW;
-                int extRet = runRootCmdDrained(extractCmd);
-                if (extRet != 0 || !new File(SYSTEM_RAW).exists()) {
-                    throw new Exception("7zz extraction failed (exit " + extRet + ") - system.raw was not produced");
+                String out = runRootCmdOutput(extractCmd(targetArchive, ext, rel));
+                for (String line : out.split("\n")) {
+                    if (!line.trim().isEmpty()) appendLog("  " + line);
+                }
+                if (!new File(SYSTEM_RAW).exists() || out.contains("ERROR:")) {
+                    throw new Exception("extraction failed - system.raw was not produced");
                 }
 
                 appendLog("✓ Extraction complete -> system.raw ready!");
 
                 mainHandler.post(() -> {
                     pbDownload.setVisibility(View.GONE);
-                    tvDownloadProgress.setText("LineageOS 23.2 (" + flavor.name() + ") installed successfully!");
+                    tvDownloadProgress.setText(rel.name + " installed successfully!");
                     btnDownloadLineage.setEnabled(true);
                 });
                 setLogStatus("Ready");
@@ -498,6 +970,16 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private static int hostAndroidMajor() {
+        try {
+            String r = Build.VERSION.RELEASE;
+            int dot = r.indexOf('.');
+            return Integer.parseInt(dot > 0 ? r.substring(0, dot) : r);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     // Unmounts the container rootfs and detaches any loop device backed by a file
@@ -525,7 +1007,7 @@ public class MainActivity extends Activity {
 
     private String wipeUserDataCmd() {
         return containerUnmountCmd() + "; " +
-               "rm -rf " + STAGE_DIR + "/data " + STAGE_DIR + "/rootfs; mkdir -p " + STAGE_DIR + "/rootfs";
+               "rm -rf " + STAGE_DIR + "/data " + STAGE_DIR + "/rootfs " + STAGE_DIR + "/*_payload.img; mkdir -p " + STAGE_DIR + "/rootfs";
     }
 
     private void confirmDeleteLineage() {
@@ -568,8 +1050,8 @@ public class MainActivity extends Activity {
                     // truncating frees the backing blocks immediately even though rm -f
                     // alone would leave them held open by that loop device.
                     "truncate -s 0 " + SYSTEM_RAW + " 2>/dev/null || true; " +
-                    "rm -f " + SYSTEM_RAW + " " + STAGE_DIR + "/*.img " + STAGE_DIR + "/*.7z " + STAGE_DIR + "/*.img.tmp; " +
-                    "rm -rf " + STAGE_DIR + "/data " + STAGE_DIR + "/rootfs; " +
+                    "rm -f " + SYSTEM_RAW + " " + IMAGE_INFO + " " + STAGE_DIR + "/*.img " + STAGE_DIR + "/*.7z " + STAGE_DIR + "/*.xz " + STAGE_DIR + "/*.img.tmp; " +
+                    "rm -rf " + STAGE_DIR + "/data " + STAGE_DIR + "/rootfs " + STAGE_DIR + "/extract; " +
                     "mkdir -p " + STAGE_DIR + "/rootfs; " +
                     "if [ -f " + SYSTEM_RAW + " ]; then echo 'WARNING: system.raw still present!'; else echo 'Container unmounted, data wiped, and storage freed.'; fi";
 
@@ -604,7 +1086,7 @@ public class MainActivity extends Activity {
             appendLog("ERROR: Root privilege required to boot LineageOS!");
             return;
         }
-        appendLog("\n[START] Preparing LineageOS 23.2 takeover...");
+        appendLog("\n[START] Preparing LineageOS takeover...");
         setLogStatus("Switching…");
         executor.execute(() -> {
             try {
