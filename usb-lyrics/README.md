@@ -47,6 +47,10 @@ Players share tags, not file paths, so the app tries, in order: a path the playe
 
 Copy `USBLyrics.apk` to your phone and open it (allow "Install unknown apps" for your file manager when asked). Android 10 or newer.
 
+## Subfolders
+
+Every subfolder of a picked folder is searched, however deep (`Music/Rock/Artist/Album/CD 2/…`), and each song's `.lrc` is written into that song's own folder, only where one is missing. If you pick several folders, all of them are covered, and a folder inside another picked folder is only scanned once. Skipped: `Android/` at the drive root, system and trash folders (`LOST.DIR`, `System Volume Information`, `$RECYCLE.BIN`, `.Trashes`, …), and macOS `._` files, which look like songs but aren't.
+
 ## Whole library
 
 To do a whole drive at once instead of song by song:

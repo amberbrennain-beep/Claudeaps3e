@@ -51,6 +51,7 @@ public class MainActivity extends Activity {
         final Uri uri;            // document Uri of the audio file
         final String lrcName;     // e.g. "01 - Song.lrc"
         final Uri existingLrc;    // document Uri of an existing .lrc, or null
+        String folder = "";       // e.g. "Rock / Album (Disc 2)", for the log
 
         Song(Uri parentDoc, String fileName, Uri uri, String lrcName, Uri existingLrc) {
             this.parentDoc = parentDoc;
@@ -313,16 +314,23 @@ public class MainActivity extends Activity {
     }
 
     private void runBatch(boolean overwrite, boolean allowPlain) {
-        log("Scanning " + Lyrics.describeTree(treeUri) + " …");
+        // Every picked folder, and every subfolder inside them.
+        List<Uri> trees = FolderWalker.outermost(new TrackLocator(this).grantedTrees());
+        if (trees.isEmpty()) trees.add(treeUri);
         List<Song> songs = new ArrayList<>();
-        Uri rootDoc = DocumentsContract.buildDocumentUriUsingTree(treeUri,
-                DocumentsContract.getTreeDocumentId(treeUri));
-        scan(DocumentsContract.getTreeDocumentId(treeUri), rootDoc, songs, 0);
-        if (cancelRequested) {
-            log("Stopped.");
-            return;
+        int folders = 0;
+        for (Uri tree : trees) {
+            log("Scanning " + Lyrics.describeTree(tree) + " and all its subfolders…");
+            folders += scan(tree, songs);
+            if (cancelRequested) {
+                log("Stopped.");
+                return;
+            }
         }
-        log("Found " + songs.size() + " song" + (songs.size() == 1 ? "" : "s") + ".");
+        int needing = 0;
+        for (Song s : songs) if (s.existingLrc == null) needing++;
+        log("Found " + songs.size() + " song" + (songs.size() == 1 ? "" : "s") + " in " + folders + " folder"
+                + (folders == 1 ? "" : "s") + "; " + needing + " without lyrics.");
         if (songs.isEmpty()) return;
 
         int saved = 0, skipped = 0, missing = 0, failed = 0;
@@ -371,10 +379,11 @@ public class MainActivity extends Activity {
                 }
                 String lrc = Lyrics.withHeader(text, artist, title, album);
                 Lyrics.write(getContentResolver(), s.parentDoc, s.lrcName, s.existingLrc, lrc);
-                log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)") + "  · " + r.source);
+                log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)") + "  · " + r.source
+                        + "\n     → " + s.folder);
                 saved++;
             } catch (Exception e) {
-                log("!  " + s.fileName + " — " + e.getMessage());
+                log("!  " + s.fileName + " — " + e.getMessage() + "\n     in " + s.folder);
                 failed++;
             }
         }
@@ -388,47 +397,41 @@ public class MainActivity extends Activity {
         log("Done. " + summary + ".");
     }
 
-    // Walks the tree, collecting audio files and noting which already have a
-    // .lrc with the same base name in the same folder.
-    private void scan(String docId, Uri dirDoc, List<Song> out, int depth) {
-        if (depth > 12 || cancelRequested) return;
-        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId);
-        List<String[]> entries = new ArrayList<>();  // {id, name, mime}
-        ContentResolver cr = getContentResolver();
-        try (Cursor c = cr.query(children, new String[]{
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE}, null, null, null)) {
-            if (c == null) return;
-            while (c.moveToNext()) {
-                entries.add(new String[]{c.getString(0), c.getString(1), c.getString(2)});
+    // Collects every audio file under the picked folder, however deep, and
+    // notes which already have a .lrc with the same base name beside them.
+    // Returns the number of folders scanned.
+    private int scan(Uri tree, List<Song> out) {
+        String rootId = DocumentsContract.getTreeDocumentId(tree);
+        int[] lastReport = {0};
+        return FolderWalker.walk(getContentResolver(), tree, rootId, (dirId, kids) -> {
+            if (cancelRequested) return false;
+            Map<String, String> lrcByBase = new HashMap<>();
+            for (String[] k : kids) {
+                if (k[1].toLowerCase(Locale.ROOT).endsWith(".lrc")) {
+                    lrcByBase.put(Lyrics.baseName(k[1]).toLowerCase(Locale.ROOT), k[0]);
+                }
             }
-        } catch (Exception e) {
-            log("Could not read a folder: " + e.getMessage());
-            return;
-        }
-
-        Map<String, String> lrcByBase = new HashMap<>();
-        for (String[] e : entries) {
-            String name = e[1];
-            if (name != null && name.toLowerCase(Locale.ROOT).endsWith(".lrc")) {
-                lrcByBase.put(Lyrics.baseName(name).toLowerCase(Locale.ROOT), e[0]);
-            }
-        }
-        for (String[] e : entries) {
-            String id = e[0], name = e[1], mime = e[2];
-            if (name == null || name.startsWith(".")) continue;
-            if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
-                scan(id, DocumentsContract.buildDocumentUriUsingTree(treeUri, id), out, depth + 1);
-            } else if (Lyrics.AUDIO_EXT.contains(Lyrics.extension(name))) {
+            Uri dirDoc = DocumentsContract.buildDocumentUriUsingTree(tree, dirId);
+            String folder = Lyrics.describeDocId(dirId);
+            for (String[] k : kids) {
+                String name = k[1];
+                if (!Lyrics.AUDIO_EXT.contains(Lyrics.extension(name))) continue;
                 String base = Lyrics.baseName(name);
                 String lrcId = lrcByBase.get(base.toLowerCase(Locale.ROOT));
-                out.add(new Song(dirDoc, name,
-                        DocumentsContract.buildDocumentUriUsingTree(treeUri, id),
+                Song song = new Song(dirDoc, name,
+                        DocumentsContract.buildDocumentUriUsingTree(tree, k[0]),
                         base + ".lrc",
-                        lrcId == null ? null : DocumentsContract.buildDocumentUriUsingTree(treeUri, lrcId)));
+                        lrcId == null ? null : DocumentsContract.buildDocumentUriUsingTree(tree, lrcId));
+                song.folder = folder;
+                out.add(song);
             }
-        }
+            if (out.size() - lastReport[0] >= 500) {
+                lastReport[0] = out.size();
+                final String msg = "Scanning… " + out.size() + " songs so far";
+                ui.post(() -> tvSummary.setText(msg));
+            }
+            return true;
+        });
     }
 
     // {artist, title, album, durationSeconds}, falling back to the file name

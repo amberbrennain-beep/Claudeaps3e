@@ -47,7 +47,7 @@ final class TrackLocator {
     }
 
     private static final Pattern TRACK_NO = Pattern.compile("^\\s*\\d{1,3}\\s*[-._)]?\\s+");
-    private static final int MAX_INDEX = 50000;
+    private static final int MAX_INDEX = 200000;
 
     private static final class Entry {
         final Uri tree;
@@ -339,9 +339,9 @@ final class TrackLocator {
             boolean same = index != null && trees.equals(indexedTrees);
             if (same && (!force || now - indexedAt < 60_000)) return index;
             List<Entry> out = new ArrayList<>();
-            for (Uri tree : trees) {
+            for (Uri tree : FolderWalker.outermost(trees)) {
                 try {
-                    walk(tree, DocumentsContract.getTreeDocumentId(tree), out, 0);
+                    walk(tree, DocumentsContract.getTreeDocumentId(tree), out);
                 } catch (Exception ignored) {
                     // drive unplugged
                 }
@@ -360,35 +360,18 @@ final class TrackLocator {
         }
     }
 
-    private void walk(Uri tree, String docId, List<Entry> out, int depth) {
-        if (depth > 12 || out.size() >= MAX_INDEX) return;
-        List<String[]> kids = children(tree, docId);
-        if (kids == null) return;
-        for (String[] k : kids) {
-            if (k[1] == null || k[1].startsWith(".")) continue;
-            if (DocumentsContract.Document.MIME_TYPE_DIR.equals(k[2])) {
-                walk(tree, k[0], out, depth + 1);
-            } else {
+    private void walk(Uri tree, String rootId, List<Entry> out) {
+        FolderWalker.walk(cr, tree, rootId, (dirId, kids) -> {
+            for (String[] k : kids) {
                 String ext = Lyrics.extension(k[1]);
-                if (Lyrics.AUDIO_EXT.contains(ext) || "lrc".equals(ext)) out.add(new Entry(tree, k[0], docId, k[1]));
+                if (Lyrics.AUDIO_EXT.contains(ext) || "lrc".equals(ext)) out.add(new Entry(tree, k[0], dirId, k[1]));
             }
-        }
+            return out.size() < MAX_INDEX;
+        });
     }
 
-    // {docId, name, mime} for each child, or null if the folder can't be read.
     private List<String[]> children(Uri tree, String docId) {
-        Uri kids = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
-        try (Cursor c = cr.query(kids, new String[]{
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE}, null, null, null)) {
-            if (c == null) return null;
-            List<String[]> out = new ArrayList<>();
-            while (c.moveToNext()) out.add(new String[]{c.getString(0), c.getString(1), c.getString(2)});
-            return out;
-        } catch (Exception e) {
-            return null;
-        }
+        return FolderWalker.children(cr, tree, docId);
     }
 
     private long durationOf(Uri u) {
