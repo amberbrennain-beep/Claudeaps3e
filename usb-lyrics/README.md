@@ -12,6 +12,10 @@ Each song goes through these sources in order, stopping at the first timed (sync
 2. **[LRCLIB](https://lrclib.net)**: free, open, keyless, with timed lyrics. Tried as an exact lookup, then field searches, then a free-text search, then title-only when the song's length can rule out same-named songs.
 3. **[lyrics.ovh](https://lyricsovh.docs.apiary.io)**: free, keyless, unsynced only. Used when LRCLIB has nothing and unsynced lyrics are allowed.
 
+**Tag correction (Deezer, iTunes).** Not lyric sources: when tags are misspelled, carry extras, or lack the artist or length, these public catalogues are asked for the real artist, title and length (only the artist and title are sent). A catalogue entry is only trusted if its title and artist are close to the tags and its length agrees within 4 seconds. The corrected names are then retried on LRCLIB and lyrics.ovh, and the catalogue's length is used for the exact lookup when the file has none. Turn it off with **Fix messy tags**.
+
+**Speed.** Within one song the requests of each stage run in parallel, and a hit in an early stage skips the later ones. "Whole library" processes four songs at once. LRCLIB's exact lookup falls back to its cache-only endpoint when the main one returns a server error.
+
 Every step is retried with cleaned-up tags: `Song (Remastered 2011)`, `Song - Live at X` and `Song (feat. Y)` are also tried as `Song`, and `Artist A & Artist B` as `Artist A`. The full artist is always tried first, so band names like AC/DC aren't split. Results whose length is more than 15 seconds off the song's are rejected, as are results from a different artist.
 
 **Choose match** in the bubble lists every candidate from every source, with its length, whether it's synced, and where it came from.

@@ -144,6 +144,26 @@ final class Lyrics {
         return a.isEmpty() ? artist.trim() : a;
     }
 
+    // 0..1 similarity of two strings after norm(): 1 - editDistance / longer length.
+    static double similarity(String a, String b) {
+        String x = norm(a), y = norm(b);
+        if (x.isEmpty() || y.isEmpty()) return 0;
+        if (x.equals(y)) return 1;
+        int[] prev = new int[y.length() + 1], cur = new int[y.length() + 1];
+        for (int j = 0; j <= y.length(); j++) prev[j] = j;
+        for (int i = 1; i <= x.length(); i++) {
+            cur[0] = i;
+            for (int j = 1; j <= y.length(); j++) {
+                int sub = prev[j - 1] + (x.charAt(i - 1) == y.charAt(j - 1) ? 0 : 1);
+                cur[j] = Math.min(sub, Math.min(prev[j] + 1, cur[j - 1] + 1));
+            }
+            int[] t = prev;
+            prev = cur;
+            cur = t;
+        }
+        return 1.0 - (double) prev[y.length()] / Math.max(x.length(), y.length());
+    }
+
     static String mmss(int sec) {
         return String.format(Locale.ROOT, "%d:%02d", sec / 60, sec % 60);
     }

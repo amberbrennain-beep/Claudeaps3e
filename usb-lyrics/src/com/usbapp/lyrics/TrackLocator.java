@@ -69,6 +69,7 @@ final class TrackLocator {
 
     // File-name index of the granted folders, rebuilt at most once a minute.
     private static List<Entry> index;
+    private static List<Entry> lrcIndex;   // just the .lrc entries of `index`
     private static long indexedAt;
     private static List<Uri> indexedTrees;
 
@@ -233,8 +234,14 @@ final class TrackLocator {
         String na = Lyrics.norm(Lyrics.primaryArtist(artist));
         Entry best = null;
         int bestScore = Integer.MIN_VALUE;
-        for (Entry e : index(trees, false)) {
-            if (!"lrc".equals(Lyrics.extension(e.name)) || !e.normBase.contains(nt)) continue;
+        index(trees, false);
+        List<Entry> lrcs;
+        synchronized (TrackLocator.class) {
+            lrcs = lrcIndex;
+        }
+        if (lrcs == null) return null;
+        for (Entry e : lrcs) {
+            if (!e.normBase.contains(nt)) continue;
             boolean artistMatch = !na.isEmpty() && (e.normBase.contains(na) || e.normParent.contains(na));
             // Without the artist in the name or folder, only an exact title is trusted.
             if (!artistMatch && !e.normBase.equals(nt)) continue;
@@ -346,7 +353,10 @@ final class TrackLocator {
                     // drive unplugged
                 }
             }
+            List<Entry> lrcs = new ArrayList<>();
+            for (Entry e : out) if ("lrc".equals(Lyrics.extension(e.name))) lrcs.add(e);
             index = out;
+            lrcIndex = lrcs;
             indexedAt = now;
             indexedTrees = new ArrayList<>(trees);
             return out;

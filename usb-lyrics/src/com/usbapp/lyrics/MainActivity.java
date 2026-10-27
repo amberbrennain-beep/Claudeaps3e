@@ -31,12 +31,15 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
 
     private static final int REQ_PICK_TREE = 1;
     private static final int REQ_MEDIA = 2;
+    private static final int BATCH_THREADS = 4;
     private static final String PREFS = LyricsService.PREFS;
     private static final String PREF_TREE = "tree_uri";
 
@@ -163,6 +166,7 @@ public class MainActivity extends Activity {
         bindSwitch(findViewById(R.id.sw_src_local), LyricsFinder.PREF_SRC_LOCAL, true);
         bindSwitch(findViewById(R.id.sw_src_lrclib), LyricsFinder.PREF_SRC_LRCLIB, true);
         bindSwitch(findViewById(R.id.sw_src_ovh), LyricsFinder.PREF_SRC_OVH, true);
+        bindSwitch(findViewById(R.id.sw_src_meta), LyricsFinder.PREF_SRC_META, true);
     }
 
     private void bindSwitch(Switch sw, String key, boolean def) {
@@ -333,7 +337,8 @@ public class MainActivity extends Activity {
                 + (folders == 1 ? "" : "s") + "; " + needing + " without lyrics.");
         if (songs.isEmpty()) return;
 
-        int saved = 0, skipped = 0, missing = 0, failed = 0;
+        final AtomicInteger saved = new AtomicInteger(), skipped = new AtomicInteger(),
+                missing = new AtomicInteger(), failed = new AtomicInteger(), done = new AtomicInteger();
         final int total = songs.size();
         ui.post(() -> {
             progress.setIndeterminate(false);
@@ -342,59 +347,74 @@ public class MainActivity extends Activity {
         });
 
         LyricsFinder finder = new LyricsFinder(prefs);
-        TrackLocator locator = new TrackLocator(this);
+        // With "replace" on, the .lrc already beside a song must not be offered back as a source.
+        LyricsFinder.LocalSource local = overwrite ? null : new TrackLocator(this)::findLocalLrc;
 
-        for (int i = 0; i < total; i++) {
-            if (cancelRequested) {
-                log("Stopped by user.");
-                break;
-            }
-            Song s = songs.get(i);
-            final int done = i;
-            final String status = (i + 1) + " / " + total + "  ·  saved " + saved + ", not found " + missing;
-            ui.post(() -> {
-                progress.setProgress(done);
-                tvSummary.setText(status);
+        // Several songs at once: each lookup is mostly waiting on the network.
+        // Four keeps well inside what the free services tolerate.
+        ExecutorService pool = Executors.newFixedThreadPool(BATCH_THREADS);
+        long started = System.currentTimeMillis();
+        for (Song s : songs) {
+            pool.execute(() -> {
+                try {
+                    if (cancelRequested) return;
+                    if (s.existingLrc != null && !overwrite) {
+                        skipped.incrementAndGet();
+                        return;
+                    }
+                    String[] tags = readTags(s);
+                    String artist = tags[0], title = tags[1], album = tags[2];
+                    int duration = Integer.parseInt(tags[3]);
+                    if (title.isEmpty()) {
+                        log("?  " + s.fileName + " — no title, skipped");
+                        missing.incrementAndGet();
+                        return;
+                    }
+                    LrclibClient.Result r = finder.find(artist, title, album, duration, allowPlain, local);
+                    String text = Lyrics.pick(r, allowPlain);
+                    if (text == null) {
+                        log("✗  " + Lyrics.label(artist, title) + (r != null && r.instrumental ? " — instrumental" : " — not found in any source"));
+                        missing.incrementAndGet();
+                        return;
+                    }
+                    Lyrics.write(getContentResolver(), s.parentDoc, s.lrcName, s.existingLrc,
+                            Lyrics.withHeader(text, artist, title, album));
+                    log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)") + "  · " + r.source
+                            + "\n     → " + s.folder);
+                    saved.incrementAndGet();
+                } catch (Exception e) {
+                    if (!cancelRequested) log("!  " + s.fileName + " — " + e.getMessage() + "\n     in " + s.folder);
+                    failed.incrementAndGet();
+                } finally {
+                    int n = done.incrementAndGet();
+                    if (n % 4 == 0 || n == total) {
+                        final String status = n + " / " + total + "  ·  saved " + saved.get() + ", not found " + missing.get();
+                        ui.post(() -> {
+                            progress.setProgress(n);
+                            tvSummary.setText(status);
+                        });
+                    }
+                }
             });
-
-            if (s.existingLrc != null && !overwrite) {
-                skipped++;
-                continue;
-            }
-            try {
-                String[] tags = readTags(s);
-                String artist = tags[0], title = tags[1], album = tags[2];
-                int duration = Integer.parseInt(tags[3]);
-                if (title.isEmpty()) {
-                    log("?  " + s.fileName + " — no title, skipped");
-                    missing++;
-                    continue;
-                }
-                LrclibClient.Result r = finder.find(artist, title, album, duration, allowPlain, locator::findLocalLrc);
-                String text = Lyrics.pick(r, allowPlain);
-                if (text == null) {
-                    log("✗  " + Lyrics.label(artist, title) + (r != null && r.instrumental ? " — instrumental" : " — not found in any source"));
-                    missing++;
-                    continue;
-                }
-                String lrc = Lyrics.withHeader(text, artist, title, album);
-                Lyrics.write(getContentResolver(), s.parentDoc, s.lrcName, s.existingLrc, lrc);
-                log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)") + "  · " + r.source
-                        + "\n     → " + s.folder);
-                saved++;
-            } catch (Exception e) {
-                log("!  " + s.fileName + " — " + e.getMessage() + "\n     in " + s.folder);
-                failed++;
-            }
         }
+        pool.shutdown();
+        try {
+            while (!pool.awaitTermination(300, TimeUnit.MILLISECONDS)) {
+                if (cancelRequested) pool.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            pool.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        if (cancelRequested) log("Stopped by user.");
 
         final String summary = "Saved " + saved + ", already had lyrics " + skipped
-                + ", not found " + missing + (failed > 0 ? ", errors " + failed : "");
+                + ", not found " + missing + (failed.get() > 0 ? ", errors " + failed : "");
         ui.post(() -> {
-            progress.setProgress(total);
+            progress.setProgress(done.get());
             tvSummary.setText(summary);
         });
-        log("Done. " + summary + ".");
+        log("Done in " + Lyrics.mmss((int) ((System.currentTimeMillis() - started) / 1000)) + ". " + summary + ".");
     }
 
     // Collects every audio file under the picked folder, however deep, and

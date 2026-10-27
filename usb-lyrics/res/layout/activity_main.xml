@@ -294,6 +294,21 @@
                 android:text="Free fallback with unsynced lyrics only; used when unsynced lyrics are allowed"
                 android:textColor="@color/text_secondary"
                 android:textSize="12sp" />
+
+            <Switch
+                android:id="@+id/sw_src_meta"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Fix messy tags (Deezer, iTunes)"
+                android:textColor="@color/text_primary" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Not lyric sources: they correct misspelled or incomplete tags, then the lyric sources are tried again. Sends only the artist and title."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <!-- Folder card -->

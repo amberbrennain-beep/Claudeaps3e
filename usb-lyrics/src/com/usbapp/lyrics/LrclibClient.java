@@ -63,14 +63,20 @@ final class LrclibClient {
     // when LRCLIB has no record within a couple of seconds of that length.
     Result get(String artist, String title, String album, int durationSec) throws IOException, JSONException {
         if (durationSec <= 0 || artist.isEmpty() || title.isEmpty()) return null;
-        StringBuilder q = new StringBuilder(BASE).append("/get?")
+        StringBuilder q = new StringBuilder()
                 .append("artist_name=").append(enc(artist))
                 .append("&track_name=").append(enc(title))
                 .append("&duration=").append(durationSec);
         if (album != null && !album.isEmpty()) q.append("&album_name=").append(enc(album));
-        // One attempt: on a miss LRCLIB may answer 503 while it checks
-        // upstream, and retrying that only slows the fallbacks down.
-        String body = get(q.toString(), 1);
+        // One attempt each: on a miss /get may answer 503 while it checks
+        // upstream, and retrying that only slows the fallbacks down. /get-cached
+        // answers from LRCLIB's own database only, so it still works then.
+        String body;
+        try {
+            body = get(BASE + "/get?" + q, 1);
+        } catch (IOException e) {
+            body = get(BASE + "/get-cached?" + q, 1);
+        }
         if (body == null) return null;
         Result r = new Result(new JSONObject(body));
         return r.synced != null || r.plain != null || r.instrumental ? r : null;
