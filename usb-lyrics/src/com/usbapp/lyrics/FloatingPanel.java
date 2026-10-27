@@ -117,14 +117,14 @@ final class FloatingPanel {
 
     void showMatchesLoading() {
         matches.removeAllViews();
-        matches.addView(text("Searching LRCLIB…", 13, C_TEXT2, false));
+        matches.addView(text("Searching all sources…", 13, C_TEXT2, false));
         matchesScroll.setVisibility(View.VISIBLE);
     }
 
     void showMatches(List<LrclibClient.Result> list, int songSec) {
         matches.removeAllViews();
         if (list.isEmpty()) {
-            matches.addView(text("No matches on LRCLIB for this title.", 13, C_TEXT2, false));
+            matches.addView(text("No source has lyrics for this title.", 13, C_TEXT2, false));
         }
         for (LrclibClient.Result r : list) {
             LinearLayout row = new LinearLayout(ctx);
@@ -137,11 +137,13 @@ final class FloatingPanel {
             row.addView(text(Lyrics.label(r.artist, r.title), 14, C_TEXT, true));
             StringBuilder sub = new StringBuilder();
             if (!r.album.isEmpty()) sub.append(r.album).append("  ·  ");
-            sub.append(Lyrics.mmss(r.durationSec));
+            if (r.durationSec > 0) sub.append(Lyrics.mmss(r.durationSec));
+            else sub.append("length unknown");
             if (songSec > 0 && r.durationSec > 0 && Math.abs(r.durationSec - songSec) > 3) {
                 sub.append(" (song is ").append(Lyrics.mmss(songSec)).append(")");
             }
-            sub.append("  ·  ").append(r.synced != null ? "synced" : "unsynced");
+            sub.append("  ·  ").append(r.synced != null ? "synced" : "unsynced")
+                    .append("  ·  ").append(r.source);
             row.addView(text(sub.toString(), 12, C_TEXT2, false));
             row.setOnClickListener(v -> {
                 matchesScroll.setVisibility(View.GONE);

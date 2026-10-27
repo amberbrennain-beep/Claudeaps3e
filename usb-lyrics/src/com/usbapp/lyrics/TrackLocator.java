@@ -220,6 +220,57 @@ final class TrackLocator {
         return null;
     }
 
+    // --------------------------------------------------- lyrics on the drive
+
+    // A .lrc somewhere in the picked folders (a "Lyrics" folder, or one left
+    // by another player) that matches the song by name. The .lrc that already
+    // sits next to the song is handled by the caller, so this only matters
+    // for lyric files kept elsewhere.
+    LrclibClient.Result findLocalLrc(String artist, String title) {
+        List<Uri> trees = grantedTrees();
+        String nt = Lyrics.norm(Lyrics.cleanTitle(title));
+        if (trees.isEmpty() || nt.length() < 3) return null;
+        String na = Lyrics.norm(Lyrics.primaryArtist(artist));
+        Entry best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Entry e : index(trees, false)) {
+            if (!"lrc".equals(Lyrics.extension(e.name)) || !e.normBase.contains(nt)) continue;
+            boolean artistMatch = !na.isEmpty() && (e.normBase.contains(na) || e.normParent.contains(na));
+            // Without the artist in the name or folder, only an exact title is trusted.
+            if (!artistMatch && !e.normBase.equals(nt)) continue;
+            int score = (artistMatch ? 30 : 0) - (e.normBase.length() - nt.length());
+            if (score > bestScore) {
+                bestScore = score;
+                best = e;
+            }
+        }
+        if (best == null) return null;
+        String text = readText(DocumentsContract.buildDocumentUriUsingTree(best.tree, best.docId));
+        if (text == null) return null;
+        // Our own header gets re-added on save; keep [offset:] and timing lines.
+        text = text.replaceAll("(?m)^\\[(ar|ti|al|re|by|length):[^\\]]*\\]\\s*$\\n?", "").trim();
+        if (text.isEmpty()) return null;
+        boolean synced = SYNCED_LINE.matcher(text).find();
+        return new LrclibClient.Result(artist, title, "", 0, synced ? text : null, synced ? null : text, "your drive");
+    }
+
+    private static final Pattern SYNCED_LINE = Pattern.compile("(?m)^\\[\\d{1,3}:\\d{2}([.:]\\d{1,3})?\\]");
+
+    private String readText(Uri u) {
+        try (java.io.InputStream in = cr.openInputStream(u)) {
+            if (in == null) return null;
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0 && out.size() < 512 * 1024) out.write(buf, 0, n);
+            byte[] b = out.toByteArray();
+            int start = b.length >= 3 && (b[0] & 0xff) == 0xEF && (b[1] & 0xff) == 0xBB && (b[2] & 0xff) == 0xBF ? 3 : 0;
+            return new String(b, start, b.length - start, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // ----------------------------------------------------------- file index
 
     private Target fromIndex(List<Uri> trees, String artist, String title, String album, long durationMs) {

@@ -63,7 +63,6 @@ public class MainActivity extends Activity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final LrclibClient lrclib = new LrclibClient();
     private volatile boolean running;
     private volatile boolean cancelRequested;
 
@@ -160,6 +159,9 @@ public class MainActivity extends Activity {
         bindSwitch(swAuto, LyricsService.PREF_AUTO, true);
         bindSwitch(swBubble, LyricsService.PREF_BUBBLE, true);
         bindSwitch(swAny, LyricsService.PREF_ANY_PLAYER, false);
+        bindSwitch(findViewById(R.id.sw_src_local), LyricsFinder.PREF_SRC_LOCAL, true);
+        bindSwitch(findViewById(R.id.sw_src_lrclib), LyricsFinder.PREF_SRC_LRCLIB, true);
+        bindSwitch(findViewById(R.id.sw_src_ovh), LyricsFinder.PREF_SRC_OVH, true);
     }
 
     private void bindSwitch(Switch sw, String key, boolean def) {
@@ -331,6 +333,9 @@ public class MainActivity extends Activity {
             progress.setProgress(0);
         });
 
+        LyricsFinder finder = new LyricsFinder(prefs);
+        TrackLocator locator = new TrackLocator(this);
+
         for (int i = 0; i < total; i++) {
             if (cancelRequested) {
                 log("Stopped by user.");
@@ -357,16 +362,16 @@ public class MainActivity extends Activity {
                     missing++;
                     continue;
                 }
-                LrclibClient.Result r = lrclib.find(artist, title, album, duration);
+                LrclibClient.Result r = finder.find(artist, title, album, duration, allowPlain, locator::findLocalLrc);
                 String text = Lyrics.pick(r, allowPlain);
                 if (text == null) {
-                    log("✗  " + Lyrics.label(artist, title) + (r != null && r.instrumental ? " — instrumental" : " — not found"));
+                    log("✗  " + Lyrics.label(artist, title) + (r != null && r.instrumental ? " — instrumental" : " — not found in any source"));
                     missing++;
                     continue;
                 }
                 String lrc = Lyrics.withHeader(text, artist, title, album);
                 Lyrics.write(getContentResolver(), s.parentDoc, s.lrcName, s.existingLrc, lrc);
-                log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)"));
+                log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)") + "  · " + r.source);
                 saved++;
             } catch (Exception e) {
                 log("!  " + s.fileName + " — " + e.getMessage());
@@ -480,7 +485,8 @@ public class MainActivity extends Activity {
         setRunning(true);
         worker.execute(() -> {
             try {
-                LrclibClient.Result r = lrclib.find(artist, title, "", 0);
+                LrclibClient.Result r = new LyricsFinder(prefs).find(artist, title, "", 0, allowPlain,
+                        new TrackLocator(MainActivity.this)::findLocalLrc);
                 String text = Lyrics.pick(r, allowPlain);
                 if (text == null) {
                     log("✗  " + Lyrics.label(artist, title) + " — not found");
@@ -492,7 +498,7 @@ public class MainActivity extends Activity {
                         DocumentsContract.getTreeDocumentId(treeUri));
                 Lyrics.write(getContentResolver(), rootDoc, name, null,
                         Lyrics.withHeader(text, a, r.title, r.album));
-                log("✓  Saved " + name + (text == r.synced ? "" : " (unsynced)"));
+                log("✓  Saved " + name + (text == r.synced ? "" : " (unsynced)") + "  · " + r.source);
             } catch (Exception e) {
                 log("!  " + Lyrics.label(artist, title) + " — " + e.getMessage());
             } finally {

@@ -70,6 +70,7 @@ public class LyricsService extends NotificationListenerService {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final LrclibClient lrclib = new LrclibClient();
+    private final LyricsOvhClient ovh = new LyricsOvhClient();
     private TrackLocator locator;
     private SharedPreferences prefs;
     private MediaSessionManager msm;
@@ -256,11 +257,14 @@ public class LyricsService extends NotificationListenerService {
                     return;
                 }
                 post(gen, State.WORKING, "Searching lyrics…\n" + tg.where, tg);
-                LrclibClient.Result r = lrclib.find(t.artist, t.title, t.album, (int) Math.round(t.durationMs / 1000.0));
+                LrclibClient.Result r = new LyricsFinder(prefs).find(t.artist, t.title, t.album,
+                        (int) Math.round(t.durationMs / 1000.0), allowPlain, locator::findLocalLrc);
                 String text = Lyrics.pick(r, allowPlain);
                 if (text == null) {
-                    post(gen, State.NOT_FOUND, (r != null && r.instrumental ? "LRCLIB lists this as instrumental." : "No lyrics found on LRCLIB.")
-                            + " Tap Choose match to search more widely.", tg);
+                    post(gen, State.NOT_FOUND, (r != null && r.instrumental ? "LRCLIB lists this as instrumental."
+                            : r != null ? "Only unsynced lyrics exist, and unsynced lyrics are turned off."
+                            : "No lyrics found in any source.")
+                            + " Tap Choose match to see every candidate.", tg);
                     return;
                 }
                 save(t, gen, tg, r, text);
@@ -278,7 +282,7 @@ public class LyricsService extends NotificationListenerService {
         TrackLocator.invalidate();
         TrackLocator.Target saved = new TrackLocator.Target(tg.treeUri, tg.parentDoc, tg.audioName, written, tg.where);
         boolean synced = text == r.synced;
-        post(gen, State.SAVED, "Saved " + tg.lrcName + (synced ? " (synced)" : " (unsynced)") + "\n" + tg.where
+        post(gen, State.SAVED, "Saved " + tg.lrcName + (synced ? " (synced" : " (unsynced") + ", from " + r.source + ")\n" + tg.where
                 + "\nIf USB Audio Player PRO doesn't show it yet, restart the song.", saved);
         if (!bubbleAllowed()) {
             ui.post(() -> Toast.makeText(this, "Lyrics saved: " + tg.lrcName, Toast.LENGTH_SHORT).show());
@@ -291,19 +295,41 @@ public class LyricsService extends NotificationListenerService {
         if (t == null) return;
         panel.showMatchesLoading();
         worker.execute(() -> {
-            List<LrclibClient.Result> list;
-            try {
-                list = lrclib.search(t.artist, t.title);
-                if (list.isEmpty() && !t.artist.isEmpty()) list = lrclib.search("", t.title);
-            } catch (Exception e) {
-                list = new ArrayList<>();
+            // Everything every source has, so the user can pick when automatic matching missed.
+            List<LrclibClient.Result> list = new ArrayList<>();
+            String cleanT = Lyrics.cleanTitle(t.title), mainA = Lyrics.primaryArtist(t.artist);
+            boolean useLrclib = prefs.getBoolean(LyricsFinder.PREF_SRC_LRCLIB, true);
+            if (prefs.getBoolean(LyricsFinder.PREF_SRC_LOCAL, true)) {
+                LrclibClient.Result local = locator.findLocalLrc(t.artist, t.title);
+                if (local != null) list.add(local);
             }
+            try {
+                if (useLrclib) {
+                    list.addAll(lrclib.search(t.artist, t.title));
+                    if (!cleanT.equals(t.title) || !mainA.equals(t.artist)) list.addAll(lrclib.search(mainA, cleanT));
+                    list.addAll(lrclib.searchText((mainA + " " + cleanT).trim()));
+                    list.addAll(lrclib.search("", cleanT));
+                }
+            } catch (Exception ignored) {
+                // show whatever the other sources found
+            }
+            if (prefs.getBoolean(LyricsFinder.PREF_SRC_OVH, true)) {
+                try {
+                    LrclibClient.Result r = ovh.find(mainA, cleanT);
+                    if (r == null && !mainA.equals(t.artist)) r = ovh.find(t.artist, cleanT);
+                    if (r != null) list.add(r);
+                } catch (Exception ignored) {
+                }
+            }
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            list.removeIf(r -> !seen.add(r.source + "|" + Lyrics.norm(r.artist) + "|" + Lyrics.norm(r.title)
+                    + "|" + r.durationSec + "|" + (r.synced != null)));
             final int sec = (int) Math.round(t.durationMs / 1000.0);
             List<LrclibClient.Result> usable = new ArrayList<>();
             for (LrclibClient.Result r : list) if (r.synced != null || r.plain != null) usable.add(r);
             usable.sort((a, b) -> Integer.compare(
                     safeScore(b, t, sec), safeScore(a, t, sec)));
-            final List<LrclibClient.Result> out = usable.size() > 15 ? usable.subList(0, 15) : usable;
+            final List<LrclibClient.Result> out = usable.size() > 25 ? usable.subList(0, 25) : usable;
             ui.post(() -> {
                 if (gen == generation) panel.showMatches(out, sec);
             });

@@ -21,6 +21,18 @@ final class Lyrics {
 
     private static final Pattern BAD_CHARS = Pattern.compile("[\\\\/:*?\"<>|\\p{Cntrl}]");
 
+    // "(Remastered 2011)", "[Live]", "(feat. X)", "(Radio Edit)" ...
+    private static final Pattern BRACKETED = Pattern.compile(
+            "\\s*[\\(\\[][^\\)\\]]*(remaster|live|feat|ft\\.|with |edit|version|mix|mono|stereo|deluxe|bonus|explicit|clean|acoustic|demo|single|album|instrumental|from |\\d{4})[^\\)\\]]*[\\)\\]]",
+            Pattern.CASE_INSENSITIVE);
+    // "Song - 2011 Remaster", "Song - Live at Wembley", "Song - Radio Edit"
+    private static final Pattern DASH_SUFFIX = Pattern.compile(
+            "\\s+-\\s+(.*(remaster|live|edit|version|mix|mono|stereo|acoustic|demo|single).*)$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern FEAT = Pattern.compile("\\s+(feat\\.?|ft\\.?|featuring)\\s+.*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ARTIST_SPLIT = Pattern.compile(
+            "\\s*(,|;|/|&|\\+| x | feat\\.?| ft\\.?| featuring| with )\\s*", Pattern.CASE_INSENSITIVE);
+
     private Lyrics() {
     }
 
@@ -111,6 +123,25 @@ final class Lyrics {
             if (Character.isLetterOrDigit(c)) sb.append(c);
         }
         return sb.toString();
+    }
+
+    // Title without remaster/live/feat. decorations that lyric databases
+    // usually leave out.
+    static String cleanTitle(String title) {
+        if (title == null) return "";
+        String t = BRACKETED.matcher(title).replaceAll("");
+        t = DASH_SUFFIX.matcher(t).replaceFirst("");
+        t = FEAT.matcher(t).replaceFirst("");
+        t = t.trim();
+        return t.isEmpty() ? title.trim() : t;
+    }
+
+    // "Artist A & Artist B feat. C" -> "Artist A"
+    static String primaryArtist(String artist) {
+        if (artist == null) return "";
+        String[] parts = ARTIST_SPLIT.split(artist.trim(), 2);
+        String a = parts.length > 0 ? parts[0].trim() : "";
+        return a.isEmpty() ? artist.trim() : a;
     }
 
     static String mmss(int sec) {

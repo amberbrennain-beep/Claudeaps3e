@@ -2,7 +2,19 @@
 
 An Android app that downloads lyrics for the songs on a USB drive (or any folder on the phone) and saves them as `.lrc` files next to each song. Car stereos, head units and USB music players that support lyrics read `Song.lrc` when it sits beside `Song.mp3`.
 
-Lyrics come from [LRCLIB](https://lrclib.net), a free, open lyrics database with no account or API key. The app fetches them on the phone as it runs; none are bundled.
+Lyrics are fetched on the phone as the app runs; none are bundled.
+
+## Lyrics sources
+
+Each song goes through these sources in order, stopping at the first timed (synced) match. Each can be turned off in the **Lyrics sources** card:
+
+1. **Lyric files already on your drive**: a matching `.lrc` kept elsewhere in your picked folders (a `Lyrics` folder, files from another player) is copied next to the song.
+2. **[LRCLIB](https://lrclib.net)**: free, open, keyless, with timed lyrics. Tried as an exact lookup, then field searches, then a free-text search, then title-only when the song's length can rule out same-named songs.
+3. **[lyrics.ovh](https://lyricsovh.docs.apiary.io)**: free, keyless, unsynced only. Used when LRCLIB has nothing and unsynced lyrics are allowed.
+
+Every step is retried with cleaned-up tags: `Song (Remastered 2011)`, `Song - Live at X` and `Song (feat. Y)` are also tried as `Song`, and `Artist A & Artist B` as `Artist A`. The full artist is always tried first, so band names like AC/DC aren't split. Results whose length is more than 15 seconds off the song's are rejected, as are results from a different artist.
+
+**Choose match** in the bubble lists every candidate from every source, with its length, whether it's synced, and where it came from.
 
 ## USB Audio Player PRO companion
 
