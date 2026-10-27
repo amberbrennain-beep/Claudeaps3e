@@ -1,13 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.usbapp.lyrics"
-    android:versionCode="1"
-    android:versionName="1.0">
+    android:versionCode="2"
+    android:versionName="2.0">
 
-    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- floating bubble over USB Audio Player PRO -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- media library lookups to find the playing song's file -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- package visibility (Android 11+) so "Open USB Audio Player PRO" works -->
+    <queries>
+        <package android:name="com.extreamsd.usbaudioplayerpro" />
+        <package android:name="com.extreamsd.usbaudioplayertrial" />
+    </queries>
 
     <application
         android:label="@string/app_name"
@@ -19,11 +31,24 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Follows the player's now-playing info; only notification listeners
+             may read other apps' media sessions. -->
+        <service
+            android:name=".LyricsService"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

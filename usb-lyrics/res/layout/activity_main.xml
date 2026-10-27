@@ -27,6 +27,204 @@
             android:textSize="14sp"
             android:layout_marginBottom="16dp" />
 
+        <!-- USB Audio Player PRO companion card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card"
+            android:padding="16dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="USB Audio Player PRO"
+                android:textColor="@color/text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tv_uapp_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Finds lyrics for every song UAPP plays and saves them next to the song file, where UAPP reads them."
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
+                android:layout_marginTop="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="8dp">
+
+                <TextView
+                    android:id="@+id/tv_step_notif"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="1. Notification access (to see what UAPP is playing)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btn_step_notif"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:background="@drawable/btn_outline"
+                    android:text="Allow"
+                    android:textAllCaps="false"
+                    android:textColor="@color/primary" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="8dp">
+
+                <TextView
+                    android:id="@+id/tv_step_overlay"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="2. Display over other apps (floating bubble)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btn_step_overlay"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:background="@drawable/btn_outline"
+                    android:text="Allow"
+                    android:textAllCaps="false"
+                    android:textColor="@color/primary" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="8dp">
+
+                <TextView
+                    android:id="@+id/tv_step_media"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="3. Music library access (to find song files)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btn_step_media"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:background="@drawable/btn_outline"
+                    android:text="Allow"
+                    android:textAllCaps="false"
+                    android:textColor="@color/primary" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="8dp">
+
+                <TextView
+                    android:id="@+id/tv_step_folder"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="4. Music folder (where .lrc files are saved)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btn_step_folder"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minWidth="88dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:background="@drawable/btn_outline"
+                    android:text="Allow"
+                    android:textAllCaps="false"
+                    android:textColor="@color/primary" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tv_restricted"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Notification access greyed out? Android blocks it for apps installed from an APK until you open App info, tap the ⋮ menu and choose Allow restricted settings."
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btn_app_info"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginTop="4dp"
+                android:background="@drawable/btn_outline"
+                android:text="Open App info"
+                android:textAllCaps="false"
+                android:textColor="@color/primary" />
+
+            <Switch
+                android:id="@+id/sw_auto"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Get lyrics automatically for each song"
+                android:textColor="@color/text_primary" />
+
+            <Switch
+                android:id="@+id/sw_bubble"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Show floating bubble over the player"
+                android:textColor="@color/text_primary" />
+
+            <Switch
+                android:id="@+id/sw_any"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Also work with other music players"
+                android:textColor="@color/text_primary" />
+
+            <Button
+                android:id="@+id/btn_open_uapp"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/btn_primary"
+                android:text="Open USB Audio Player PRO"
+                android:textAllCaps="false"
+                android:textColor="@color/on_primary" />
+        </LinearLayout>
+
         <!-- Folder card -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -39,7 +237,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Music folder"
+                android:text="Whole library"
                 android:textColor="@color/text_primary"
                 android:textSize="18sp"
                 android:textStyle="bold" />

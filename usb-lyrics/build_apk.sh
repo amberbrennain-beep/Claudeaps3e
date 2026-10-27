@@ -77,7 +77,7 @@ javac -source 1.8 -target 1.8 -Xlint:-options \
 
 echo "=== 5. Dexing ==="
 "$SDK_TOOLS/d8" \
-    --min-api 26 \
+    --min-api 29 \
     --lib "$PLATFORM_JAR" \
     --output "$BUILD_DIR/dex" \
     $(find "$BUILD_DIR/classes" -name '*.class')

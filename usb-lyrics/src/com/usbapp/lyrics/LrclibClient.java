@@ -10,6 +10,8 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.List;
 
 // Minimal client for the public LRCLIB API (https://lrclib.net/docs).
 // No API key is needed; LRCLIB asks clients to send an identifying User-Agent.
@@ -60,37 +62,49 @@ final class LrclibClient {
             }
         }
 
-        StringBuilder q = new StringBuilder(BASE).append("/search?track_name=").append(enc(title));
-        if (!artist.isEmpty()) q.append("&artist_name=").append(enc(artist));
-        String body = get(q.toString());
-        if (body == null) return null;
-
-        JSONArray arr;
-        try {
-            arr = new JSONArray(body);
-        } catch (Exception e) {
-            return null;
-        }
         Result best = null;
         int bestScore = Integer.MIN_VALUE;
-        for (int i = 0; i < arr.length(); i++) {
-            Result r = new Result(arr.getJSONObject(i));
+        for (Result r : search(artist, title)) {
             if (r.synced == null && r.plain == null) continue;
-            int score = 0;
-            if (r.synced != null) score += 100;
-            if (durationSec > 0 && r.durationSec > 0) {
-                int diff = Math.abs(r.durationSec - durationSec);
-                if (diff > 15) continue;   // almost certainly a different recording
-                score -= diff * 5;
-            }
-            if (r.title.equalsIgnoreCase(title)) score += 20;
-            if (!artist.isEmpty() && r.artist.equalsIgnoreCase(artist)) score += 20;
+            int score = score(r, artist, title, durationSec);
             if (score > bestScore) {
                 bestScore = score;
                 best = r;
             }
         }
         return best;
+    }
+
+    // Raw search results, best first, for letting the user choose a match.
+    List<Result> search(String artist, String title) throws IOException, JSONException {
+        StringBuilder q = new StringBuilder(BASE).append("/search?track_name=").append(enc(title));
+        if (!artist.isEmpty()) q.append("&artist_name=").append(enc(artist));
+        List<Result> out = new ArrayList<>();
+        String body = get(q.toString());
+        if (body == null) return out;
+        JSONArray arr;
+        try {
+            arr = new JSONArray(body);
+        } catch (JSONException e) {
+            return out;
+        }
+        for (int i = 0; i < arr.length(); i++) out.add(new Result(arr.getJSONObject(i)));
+        return out;
+    }
+
+    // Higher is better; Integer.MIN_VALUE means "different recording".
+    static int score(Result r, String artist, String title, int durationSec) {
+        int score = 0;
+        if (r.synced != null) score += 100;
+        else if (r.plain == null) score -= 200;
+        if (durationSec > 0 && r.durationSec > 0) {
+            int diff = Math.abs(r.durationSec - durationSec);
+            if (diff > 15) return Integer.MIN_VALUE;   // almost certainly a different recording
+            score -= diff * 5;
+        }
+        if (r.title.equalsIgnoreCase(title)) score += 20;
+        if (!artist.isEmpty() && r.artist.equalsIgnoreCase(artist)) score += 20;
+        return score;
     }
 
     private static String enc(String s) {

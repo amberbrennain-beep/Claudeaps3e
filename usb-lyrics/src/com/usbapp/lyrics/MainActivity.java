@@ -3,7 +3,12 @@ package com.usbapp.lyrics;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Intent;
+import android.content.ComponentName;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.provider.Settings;
+import android.widget.Switch;
 import android.database.Cursor;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
@@ -19,29 +24,22 @@ import android.widget.EditText;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
 
     private static final int REQ_PICK_TREE = 1;
-    private static final String PREFS = "usb_lyrics";
+    private static final int REQ_MEDIA = 2;
+    private static final String PREFS = LyricsService.PREFS;
     private static final String PREF_TREE = "tree_uri";
 
-    private static final Set<String> AUDIO_EXT = new HashSet<>(Arrays.asList(
-            "mp3", "flac", "m4a", "aac", "ogg", "oga", "opus", "wav", "wma", "alac", "aiff", "aif", "ape", "wv"));
 
     // "01 - Artist - Title", "01. Title", "Artist - Title"
     private static final Pattern TRACK_NO = Pattern.compile("^\\s*\\d{1,3}\\s*[-._)]?\\s+");
@@ -75,6 +73,10 @@ public class MainActivity extends Activity {
     private Button btnPick, btnStart, btnSingle;
     private EditText etArtist, etTitle;
     private ProgressBar progress;
+    private TextView tvUappStatus, tvStepNotif, tvStepOverlay, tvStepMedia, tvStepFolder;
+    private Button btnStepNotif, btnStepOverlay, btnStepMedia, btnStepFolder;
+    private Switch swAuto, swBubble, swAny;
+    private SharedPreferences prefs;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -104,6 +106,11 @@ public class MainActivity extends Activity {
         });
         btnSingle.setOnClickListener(v -> startSingle());
 
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        cbPlain.setChecked(prefs.getBoolean(LyricsService.PREF_PLAIN, true));
+        cbPlain.setOnCheckedChangeListener((b, on) -> prefs.edit().putBoolean(LyricsService.PREF_PLAIN, on).apply());
+        setupUapp();
+
         String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_TREE, null);
         if (saved != null) {
             Uri u = Uri.parse(saved);
@@ -113,10 +120,127 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        refreshUapp();
+    }
+
+    @Override
     protected void onDestroy() {
         cancelRequested = true;
         worker.shutdownNow();
         super.onDestroy();
+    }
+
+    // ---------------------------------------------------------------- UAPP
+
+    private void setupUapp() {
+        tvUappStatus = findViewById(R.id.tv_uapp_status);
+        tvStepNotif = findViewById(R.id.tv_step_notif);
+        tvStepOverlay = findViewById(R.id.tv_step_overlay);
+        tvStepMedia = findViewById(R.id.tv_step_media);
+        tvStepFolder = findViewById(R.id.tv_step_folder);
+        btnStepNotif = findViewById(R.id.btn_step_notif);
+        btnStepOverlay = findViewById(R.id.btn_step_overlay);
+        btnStepMedia = findViewById(R.id.btn_step_media);
+        btnStepFolder = findViewById(R.id.btn_step_folder);
+        swAuto = findViewById(R.id.sw_auto);
+        swBubble = findViewById(R.id.sw_bubble);
+        swAny = findViewById(R.id.sw_any);
+
+        btnStepNotif.setOnClickListener(v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+        btnStepOverlay.setOnClickListener(v -> open(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName()))));
+        btnStepMedia.setOnClickListener(v -> requestPermissions(new String[]{mediaPermission()}, REQ_MEDIA));
+        btnStepFolder.setOnClickListener(v -> pickFolder());
+        findViewById(R.id.btn_app_info).setOnClickListener(v -> open(new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))));
+        findViewById(R.id.btn_open_uapp).setOnClickListener(v -> openUapp());
+
+        bindSwitch(swAuto, LyricsService.PREF_AUTO, true);
+        bindSwitch(swBubble, LyricsService.PREF_BUBBLE, true);
+        bindSwitch(swAny, LyricsService.PREF_ANY_PLAYER, false);
+    }
+
+    private void bindSwitch(Switch sw, String key, boolean def) {
+        sw.setChecked(prefs.getBoolean(key, def));
+        sw.setOnCheckedChangeListener((b, on) -> {
+            prefs.edit().putBoolean(key, on).apply();
+            LyricsService.refreshFromSettings();
+        });
+    }
+
+    private void refreshUapp() {
+        if (tvStepNotif == null) return;
+        boolean notif = hasNotificationAccess();
+        boolean overlay = Settings.canDrawOverlays(this);
+        boolean media = checkSelfPermission(mediaPermission()) == PackageManager.PERMISSION_GRANTED;
+        int folders = new TrackLocator(this).grantedTrees().size();
+
+        step(tvStepNotif, btnStepNotif, "1. Notification access (to see what UAPP is playing)", notif, "Allow", "Settings");
+        step(tvStepOverlay, btnStepOverlay, "2. Display over other apps (floating bubble)", overlay, "Allow", "Settings");
+        step(tvStepMedia, btnStepMedia, "3. Music library access (to find song files)", media, "Allow", "Allowed");
+        step(tvStepFolder, btnStepFolder, "4. Music folder (where .lrc files are saved)"
+                + (folders > 0 ? " — " + folders + " picked" : ""), folders > 0, "Pick", "Add");
+        btnStepMedia.setEnabled(!media);
+        btnStepFolder.setEnabled(!running);
+        findViewById(R.id.tv_restricted).setVisibility(notif ? View.GONE : View.VISIBLE);
+        findViewById(R.id.btn_app_info).setVisibility(notif ? View.GONE : View.VISIBLE);
+
+        boolean installed = uappPackage() != null;
+        String status;
+        if (!installed) status = "USB Audio Player PRO isn't installed. Lyrics are still saved as .lrc files next to your songs.";
+        else if (notif && folders > 0) status = LyricsService.isRunning()
+                ? "Ready. Play a song in USB Audio Player PRO and its lyrics are saved next to the file."
+                : "Almost ready. If nothing happens when a song plays, turn notification access off and on again.";
+        else status = "Finish the steps below so lyrics are fetched for each song UAPP plays.";
+        tvUappStatus.setText(status);
+    }
+
+    private static void step(TextView tv, Button b, String label, boolean done, String todo, String doneLabel) {
+        tv.setText((done ? "✓  " : "") + label);
+        b.setText(done ? doneLabel : todo);
+    }
+
+    private boolean hasNotificationAccess() {
+        String flat = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
+        ComponentName me = new ComponentName(this, LyricsService.class);
+        return flat != null && (flat.contains(me.flattenToString()) || flat.contains(me.flattenToShortString()));
+    }
+
+    private static String mediaPermission() {
+        return Build.VERSION.SDK_INT >= 33 ? "android.permission.READ_MEDIA_AUDIO"
+                : "android.permission.READ_EXTERNAL_STORAGE";
+    }
+
+    private String uappPackage() {
+        for (String pkg : new String[]{"com.extreamsd.usbaudioplayerpro", "com.extreamsd.usbaudioplayertrial"}) {
+            if (getPackageManager().getLaunchIntentForPackage(pkg) != null) return pkg;
+        }
+        return null;
+    }
+
+    private void openUapp() {
+        String pkg = uappPackage();
+        if (pkg == null) {
+            open(new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.extreamsd.usbaudioplayerpro")));
+            return;
+        }
+        open(getPackageManager().getLaunchIntentForPackage(pkg));
+    }
+
+    private void open(Intent i) {
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            log("Could not open that screen: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        refreshUapp();
     }
 
     // ---------------------------------------------------------------- folder
@@ -146,7 +270,9 @@ public class MainActivity extends Activity {
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_TREE, u.toString()).apply();
         setTree(u);
-        log("Folder selected: " + describeTree(u));
+        TrackLocator.invalidate();
+        refreshUapp();
+        log("Folder selected: " + Lyrics.describeTree(u));
     }
 
     private boolean hasPermission(Uri u) {
@@ -158,23 +284,7 @@ public class MainActivity extends Activity {
 
     private void setTree(Uri u) {
         treeUri = u;
-        tvFolder.setText(describeTree(u));
-    }
-
-    // "primary:Music" -> "Internal storage / Music", "1234-ABCD:Songs" -> "USB / SD (1234-ABCD) / Songs"
-    private static String describeTree(Uri u) {
-        String id;
-        try {
-            id = DocumentsContract.getTreeDocumentId(u);
-        } catch (Exception e) {
-            return u.toString();
-        }
-        int colon = id.indexOf(':');
-        if (colon < 0) return id;
-        String vol = id.substring(0, colon);
-        String path = id.substring(colon + 1);
-        String volName = "primary".equals(vol) ? "Internal storage" : "USB / SD (" + vol + ")";
-        return path.isEmpty() ? volName : volName + " / " + path.replace("/", " / ");
+        tvFolder.setText(Lyrics.describeTree(u));
     }
 
     // ----------------------------------------------------------------- batch
@@ -201,7 +311,7 @@ public class MainActivity extends Activity {
     }
 
     private void runBatch(boolean overwrite, boolean allowPlain) {
-        log("Scanning " + describeTree(treeUri) + " …");
+        log("Scanning " + Lyrics.describeTree(treeUri) + " …");
         List<Song> songs = new ArrayList<>();
         Uri rootDoc = DocumentsContract.buildDocumentUriUsingTree(treeUri,
                 DocumentsContract.getTreeDocumentId(treeUri));
@@ -248,15 +358,15 @@ public class MainActivity extends Activity {
                     continue;
                 }
                 LrclibClient.Result r = lrclib.find(artist, title, album, duration);
-                String text = pickLyrics(r, allowPlain);
+                String text = Lyrics.pick(r, allowPlain);
                 if (text == null) {
-                    log("✗  " + label(artist, title) + (r != null && r.instrumental ? " — instrumental" : " — not found"));
+                    log("✗  " + Lyrics.label(artist, title) + (r != null && r.instrumental ? " — instrumental" : " — not found"));
                     missing++;
                     continue;
                 }
-                String lrc = withHeader(text, artist, title, album);
-                writeLrc(s, lrc);
-                log("✓  " + label(artist, title) + (text == r.synced ? "" : " (unsynced)"));
+                String lrc = Lyrics.withHeader(text, artist, title, album);
+                Lyrics.write(getContentResolver(), s.parentDoc, s.lrcName, s.existingLrc, lrc);
+                log("✓  " + Lyrics.label(artist, title) + (text == r.synced ? "" : " (unsynced)"));
                 saved++;
             } catch (Exception e) {
                 log("!  " + s.fileName + " — " + e.getMessage());
@@ -297,7 +407,7 @@ public class MainActivity extends Activity {
         for (String[] e : entries) {
             String name = e[1];
             if (name != null && name.toLowerCase(Locale.ROOT).endsWith(".lrc")) {
-                lrcByBase.put(baseName(name).toLowerCase(Locale.ROOT), e[0]);
+                lrcByBase.put(Lyrics.baseName(name).toLowerCase(Locale.ROOT), e[0]);
             }
         }
         for (String[] e : entries) {
@@ -305,8 +415,8 @@ public class MainActivity extends Activity {
             if (name == null || name.startsWith(".")) continue;
             if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
                 scan(id, DocumentsContract.buildDocumentUriUsingTree(treeUri, id), out, depth + 1);
-            } else if (AUDIO_EXT.contains(extension(name))) {
-                String base = baseName(name);
+            } else if (Lyrics.AUDIO_EXT.contains(Lyrics.extension(name))) {
+                String base = Lyrics.baseName(name);
                 String lrcId = lrcByBase.get(base.toLowerCase(Locale.ROOT));
                 out.add(new Song(dirDoc, name,
                         DocumentsContract.buildDocumentUriUsingTree(treeUri, id),
@@ -324,10 +434,10 @@ public class MainActivity extends Activity {
         MediaMetadataRetriever mmr = new MediaMetadataRetriever();
         try {
             mmr.setDataSource(this, s.uri);
-            artist = nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST));
-            if (artist.isEmpty()) artist = nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST));
-            title = nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE));
-            album = nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM));
+            artist = Lyrics.nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST));
+            if (artist.isEmpty()) artist = Lyrics.nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST));
+            title = Lyrics.nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE));
+            album = Lyrics.nz(mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM));
             String d = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
             if (d != null) duration = (int) Math.round(Long.parseLong(d.trim()) / 1000.0);
         } catch (Exception ignored) {
@@ -340,7 +450,7 @@ public class MainActivity extends Activity {
         }
 
         if (title.isEmpty() || artist.isEmpty()) {
-            String base = TRACK_NO.matcher(baseName(s.fileName)).replaceFirst("").replace('_', ' ').trim();
+            String base = TRACK_NO.matcher(Lyrics.baseName(s.fileName)).replaceFirst("").replace('_', ' ').trim();
             int dash = base.indexOf(" - ");
             if (dash > 0) {
                 if (artist.isEmpty()) artist = base.substring(0, dash).trim();
@@ -350,38 +460,6 @@ public class MainActivity extends Activity {
             }
         }
         return new String[]{artist, title, album, String.valueOf(duration)};
-    }
-
-    private static String pickLyrics(LrclibClient.Result r, boolean allowPlain) {
-        if (r == null) return null;
-        if (r.synced != null) return r.synced;
-        return allowPlain ? r.plain : null;
-    }
-
-    // Standard LRC ID tags so players show the right song info.
-    private static String withHeader(String body, String artist, String title, String album) {
-        StringBuilder sb = new StringBuilder();
-        if (!artist.isEmpty()) sb.append("[ar:").append(artist).append("]\n");
-        if (!title.isEmpty()) sb.append("[ti:").append(title).append("]\n");
-        if (album != null && !album.isEmpty()) sb.append("[al:").append(album).append("]\n");
-        sb.append("[re:USB Lyrics / lrclib.net]\n");
-        sb.append(body.replace("\r\n", "\n").trim()).append('\n');
-        return sb.toString();
-    }
-
-    private void writeLrc(Song s, String lrc) throws Exception {
-        ContentResolver cr = getContentResolver();
-        Uri target = s.existingLrc;
-        if (target == null) {
-            // application/octet-stream keeps the name exactly as given; text/plain
-            // would make some providers save "Song.lrc.txt".
-            target = DocumentsContract.createDocument(cr, s.parentDoc, "application/octet-stream", s.lrcName);
-            if (target == null) throw new Exception("could not create " + s.lrcName);
-        }
-        try (OutputStream os = cr.openOutputStream(target, "wt")) {
-            if (os == null) throw new Exception("could not open " + s.lrcName);
-            os.write(lrc.getBytes(StandardCharsets.UTF_8));
-        }
     }
 
     // ---------------------------------------------------------------- single
@@ -403,20 +481,20 @@ public class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 LrclibClient.Result r = lrclib.find(artist, title, "", 0);
-                String text = pickLyrics(r, allowPlain);
+                String text = Lyrics.pick(r, allowPlain);
                 if (text == null) {
-                    log("✗  " + label(artist, title) + " — not found");
+                    log("✗  " + Lyrics.label(artist, title) + " — not found");
                     return;
                 }
                 String a = artist.isEmpty() ? r.artist : artist;
-                String name = sanitize((a.isEmpty() ? "" : a + " - ") + (r.title.isEmpty() ? title : r.title)) + ".lrc";
+                String name = Lyrics.sanitize((a.isEmpty() ? "" : a + " - ") + (r.title.isEmpty() ? title : r.title)) + ".lrc";
                 Uri rootDoc = DocumentsContract.buildDocumentUriUsingTree(treeUri,
                         DocumentsContract.getTreeDocumentId(treeUri));
-                writeLrc(new Song(rootDoc, name, null, name, null),
-                        withHeader(text, a, r.title, r.album));
+                Lyrics.write(getContentResolver(), rootDoc, name, null,
+                        Lyrics.withHeader(text, a, r.title, r.album));
                 log("✓  Saved " + name + (text == r.synced ? "" : " (unsynced)"));
             } catch (Exception e) {
-                log("!  " + label(artist, title) + " — " + e.getMessage());
+                log("!  " + Lyrics.label(artist, title) + " — " + e.getMessage());
             } finally {
                 ui.post(() -> setRunning(false));
             }
@@ -444,30 +522,5 @@ public class MainActivity extends Activity {
             if (cur.length() > 60000) cur = cur.subSequence(cur.length() - 40000, cur.length());
             tvLog.setText(cur.length() == 0 ? msg : cur + "\n" + msg);
         });
-    }
-
-    private static String label(String artist, String title) {
-        return artist.isEmpty() ? title : artist + " - " + title;
-    }
-
-    private static String nz(String s) {
-        return s == null ? "" : s.trim();
-    }
-
-    private static String extension(String name) {
-        int dot = name.lastIndexOf('.');
-        return dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
-    }
-
-    private static String baseName(String name) {
-        int dot = name.lastIndexOf('.');
-        return dot <= 0 ? name : name.substring(0, dot);
-    }
-
-    // FAT32/exFAT (what most USB sticks use) reject these characters.
-    private static String sanitize(String name) {
-        Matcher m = Pattern.compile("[\\\\/:*?\"<>|\\p{Cntrl}]").matcher(name);
-        String s = m.replaceAll("_").trim();
-        return s.isEmpty() ? "lyrics" : s;
     }
 }
