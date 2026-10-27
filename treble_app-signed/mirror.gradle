@@ -1,0 +1,12 @@
+def mirror = { RepositoryHandler repos ->
+    repos.all { r ->
+        if (r instanceof MavenArtifactRepository && r.url.toString().contains('repo.maven.apache.org')) {
+            r.url = 'https://maven-central.storage-download.googleapis.com/maven2/'
+        }
+    }
+}
+settingsEvaluated { s -> mirror(s.pluginManagement.repositories) }
+allprojects { p ->
+    mirror(p.buildscript.repositories)
+    mirror(p.repositories)
+}
